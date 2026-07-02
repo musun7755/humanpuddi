@@ -78,12 +78,20 @@ def send_discord_error(message: str) -> None:
 
 
 def _discord_review(record: dict[str, str], manual_reason: str = "") -> None:
-    """將 Threads 留言送到 Discord；純通知，不產生草稿或互動按鈕。"""
+    """將 Threads 留言送到 Discord，交由本機 Bot 產生草稿或略過。"""
     token, channel = _config("DISCORD_BOT_TOKEN"), _config("DISCORD_REVIEW_CHANNEL_ID")
     payload = {
         "embeds": [{"title": "Threads 新留言", "color": 0x00A67E,
                     "fields": [{"name": "留言作者", "value": record["author"][:1024]},
-                               {"name": "留言內容｜可直接複製", "value": record["comment_text"][:1024]}]}],
+                               {"name": "留言內容", "value": record["comment_text"][:1024]}],
+                    "footer": {"text": "按下「想回覆」只會產生草稿，不會自動發布"}}],
+        "components": [{
+            "type": 1,
+            "components": [
+                {"type": 2, "style": 1, "label": "想回覆", "custom_id": f"hexing:reply:draft:{record['reply_id']}"},
+                {"type": 2, "style": 2, "label": "略過", "custom_id": f"hexing:reply:skip:{record['reply_id']}"},
+            ],
+        }],
     }
     response = requests.post(f"https://discord.com/api/v10/channels/{channel}/messages", headers={"Authorization": f"Bot {token}"}, json=payload, timeout=15)
     if not response.ok:
