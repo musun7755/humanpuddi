@@ -93,7 +93,16 @@ def _telegram_review(record: dict[str, str]) -> bool:
     )
     response = requests.post(
         f"https://api.telegram.org/bot{token}/sendMessage",
-        json={"chat_id": chat_id, "text": text[:4096]},
+        json={
+            "chat_id": chat_id,
+            "text": text[:4096],
+            "reply_markup": {
+                "inline_keyboard": [[{
+                    "text": "產生回覆草稿",
+                    "callback_data": f"tg:reply:draft:{record['reply_id']}",
+                }]]
+            },
+        },
         timeout=15,
     )
     if not response.ok:
