@@ -77,6 +77,33 @@ def send_discord_error(message: str) -> None:
         print(f"[錯誤] {message}\n[Discord error 通知亦失敗] {exc}")
 
 
+def _telegram_review(record: dict[str, str]) -> bool:
+    """若已設定 Telegram，並行送出一則新留言測試通知。"""
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        print("[Telegram] 未設定 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，略過通知。")
+        return False
+
+    text = (
+        "Threads 新留言\n\n"
+        f"作者：{record['author']}\n"
+        f"內容：{record['comment_text']}\n\n"
+        f"reply_id：{record['reply_id']}"
+    )
+    response = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={"chat_id": chat_id, "text": text[:4096]},
+        timeout=15,
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"Telegram 通知失敗 HTTP {response.status_code}: {response.text}"
+        )
+    print(f"[Telegram] 通知成功：reply_id={record['reply_id']}")
+    return True
+
+
 def _discord_review(record: dict[str, str], manual_reason: str = "") -> None:
     """通知本機 Discord Bot，讓它自動產生一則待審回覆草稿。"""
     token, channel = _config("DISCORD_BOT_TOKEN"), _config("DISCORD_REVIEW_CHANNEL_ID")
@@ -143,6 +170,10 @@ def handle_event(event: dict[str, Any]) -> bool:
             return False
         rows = _rows(); rows.append(record); _write(rows)
     try:
+        try:
+            _telegram_review(record)
+        except Exception as exc:
+            print(f"[Telegram] 通知失敗：{exc}")
         _discord_review(record)
         update_record(reply_id, status="notified", handled_at=now())
         return True
