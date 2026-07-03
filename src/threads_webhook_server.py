@@ -183,7 +183,6 @@ def handle_event(event: dict[str, Any]) -> bool:
             _telegram_review(record)
         except Exception as exc:
             print(f"[Telegram] 通知失敗：{exc}")
-        _discord_review(record)
         update_record(reply_id, status="notified", handled_at=now())
         return True
     except Exception as exc:

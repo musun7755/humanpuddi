@@ -20,6 +20,7 @@ ECOSYSTEM_CSV: Final = PROJECT_ROOT / "data" / "ecosystem_signals.csv"
 CONFIG_FILES: Final = (
     "bot_profile.md",
     "character_hexing.md",
+    "content_strategy.md",
     "social_rules.md",
     "image_rules.md",
     "trend_keywords.txt",
@@ -27,7 +28,7 @@ CONFIG_FILES: Final = (
 
 SYSTEM_INSTRUCTION: Final = """你是 HexingBot 的原創社群內容編輯器。
 你只產生供人工審核的候選文字與 Flow prompt，絕不宣稱已發布，也不要求自動發布。
-角色赫湦面向粉絲時使用 Public Mode：幽默、公開、保持界線，不戀愛、不曖昧。
+角色赫湦面向粉絲時使用 Public Mode：正能量、溫暖、搞笑、公開、保持界線，不戀愛、不曖昧；禁止毒舌、羞辱、優越感與煽動對立。
 面向操作者時使用 Operator Mode：像有風格的創意搭檔。
 禁止搬運、改寫、致敬或模仿 meme、歌詞、歌曲封面、MV、名人照片、動漫、影劇、遊戲角色或他人作品。
 Flow prompt 只能描述原創視覺，不得指定在世藝術家、品牌角色或可辨識作品的風格。
@@ -139,21 +140,22 @@ def build_prompt(
         ecosystem_text = f"""
 
 【最近社群氣氛（僅供靈感參考）】
-以下內容不是硬性題目，不要直接報導熱門事件、照抄句子或聲稱即時熱門。赫湦仍以自己的日常、正能量、好笑、日常可愛與生活觀察為主。
+以下內容不是硬性題目，不要直接報導熱門事件、照抄句子或聲稱即時熱門。應優先找出赫湦會產生鮮明反應的角度，而不是把所有訊號轉成可愛日常。
 {ecosystem_context}
 """
 
     return f"""今天要為 @humanpuddi 產生三則可人工審核的 Threads 候選貼文。
 
-請先只根據 trend_keywords.txt 的人工關鍵字，整理「今日可用趨勢方向摘要」。這不是即時熱門搜尋；若檔案空白，請明確說明沒有人工趨勢關鍵字，並改用常青原創方向，不得捏造熱門事件。
+請根據 trend_keywords.txt 與提供的最近社群氣氛，整理「今日可用趨勢方向摘要」。這些資料不代表即時熱門；若缺乏可信的近期訊號，請明確說明並改用原創角色發想，不得捏造熱門事件。原創角色發想不等於常青日常，可來自怪宣言、溫暖觀點、角色反差、創作者幕後、人際或網路觀察。
 
 接著產生剛好三則彼此明顯不同的候選，candidate_id 依序為 A、B、C。每則都要：
+0. 依 content_strategy.md 選擇本輪組合。三則必須跨至少三個內容支柱、兩種情緒與兩種貼文功能，但不要機械地固定 A、B、C 類型。不得三則都寫生活瑣事、可愛療癒、寵物、食物、收納或小確幸；即使重新生成也要維持題材、情緒與功能跨度。
 1. 使用赫湦 Public Mode，適合公開粉絲閱讀。
 2. thread_text 是可直接人工審核的繁體中文貼文。
 3. thread_text 必須是完成稿，適合直接複製貼到 Threads；自然分行，可自由使用適量 Emoji 排版，不要輸出說明或 Markdown 標題，最多 350 字。
 4. flow_prompt 是精簡英文原創視覺提示詞，只提供給操作者手動使用 Flow，最多 700 字；不得要求自動生圖或上傳。
-5. content_category 是簡短文案分類標籤，例如「日常／搞笑」，最多 30 字。
-6. inspiration_source 用繁體中文簡述原創靈感或流行方向，最多 180 字。若沒有可信的近期梗，寫明是常青日常方向，不得捏造流行事件或假稱使用某個 meme。
+5. content_category 用「內容支柱／貼文功能／情緒」標示本則策略，例如「人格招牌／辨識／荒謬」，最多 30 字。
+6. inspiration_source 用繁體中文簡述原創靈感或流行方向，最多 180 字。若沒有可信的近期梗，寫明「原創角色發想」及實際使用的發想引擎，不得捏造流行事件或假稱使用某個 meme。
 
 安全規則仍必須在生成時遵守，但不要輸出 negative prompt、推薦、版權檢查、邊界檢查或 Operator Mode 說明。
 
