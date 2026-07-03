@@ -54,6 +54,7 @@ def generate_reply_draft(
     author: str,
     comment_text: str,
     post_text: str = "",
+    conversation_text: str = "",
     previous_draft: str = "",
 ) -> dict[str, object]:
     character = CHARACTER_FILE.read_text(encoding="utf-8")
@@ -61,8 +62,12 @@ def generate_reply_draft(
     if previous_draft.strip():
         retry = f"\nPrevious draft: {previous_draft.strip()}\nUse a different sentence pattern, reaction angle, and joke mechanism. Do not merely replace words with synonyms.\n"
     original = post_text.strip() or "(Original post unavailable. Do not invent context.)"
+    conversation = conversation_text.strip() or "(No earlier messages in this reply branch.)"
     internet_language = _recent_internet_language()
-    prompt = f"""Original post: {original}
+    prompt = f"""Original post: {original[:3000]}
+Earlier messages in this same reply branch, oldest to newest:
+{conversation[:3000]}
+
 Comment author: {author}
 Comment: {comment_text}
 {retry}
@@ -71,7 +76,7 @@ Decide whether this public comment is safe for an automatic draft. Ordinary prai
 
 When safe, write one short reply from 赫湦 in natural Taiwanese Threads voice:
 - Usually 8–60 Traditional Chinese characters and no more than two short sentences. Do not greatly exceed a short source comment.
-- Understand both the original post and the comment. Reply to their actual combined context. Do not react only to the surface wording and do not invent background.
+- Understand the original post, earlier messages in this same reply branch, and the latest comment. Reply to their combined context. Do not react only to the surface wording and do not invent background.
 - Clearly catch the comment's key object, action, or meaning so the target is obvious, then add one natural reaction. Do not force a joke when none fits.
 - Use sparse punctuation. Avoid periods, excessive commas, and repeated exclamation marks. Use natural spacing or a line break for Taiwanese chat rhythm.
 - Use one line for one reaction. Use two lines only when there are genuinely two beats. Never fragment a sentence merely for layout.

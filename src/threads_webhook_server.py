@@ -21,7 +21,7 @@ PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
 ENV_FILE: Final = PROJECT_ROOT / ".env"
 LOG_FILE: Final = PROJECT_ROOT / "data" / "reply_log.csv"
 AUTO_STATE_FILE: Final = PROJECT_ROOT / "data" / "auto_reply_state.json"
-FIELDS: Final = ["event_id", "reply_id", "thread_id", "author", "comment_text", "post_text", "draft_reply", "status", "created_at", "handled_at"]
+FIELDS: Final = ["event_id", "reply_id", "thread_id", "author", "comment_text", "post_text", "conversation_text", "draft_reply", "status", "created_at", "handled_at"]
 GRAPH_BASE: Final = "https://graph.threads.net/v1.0"
 LOCK = threading.RLock()
 AUTO_REPLY_DAILY_LIMIT: Final = 20
@@ -224,13 +224,43 @@ def _original_post(record: dict[str, str]) -> tuple[str, str]:
     return "", ""
 
 
+def _conversation_context(reply_id: str, root_post_id: str = "", limit: int = 5) -> str:
+    """沿 replied_to 往前追同一分支，不讀取旁支留言。"""
+    token = _config("THREADS_ACCESS_TOKEN")
+    current_id = reply_id
+    items: list[str] = []
+    seen: set[str] = set()
+    for _ in range(limit + 1):
+        if not current_id or current_id in seen or current_id == root_post_id:
+            break
+        seen.add(current_id)
+        response = requests.get(
+            f"{GRAPH_BASE}/{current_id}",
+            params={"fields": "id,text,username,replied_to", "access_token": token},
+            timeout=20,
+        )
+        if not response.ok:
+            break
+        detail = response.json()
+        if current_id != reply_id:
+            text = " ".join(str(detail.get("text") or "").split())
+            if text:
+                items.append(f"@{detail.get('username') or '未知'}：{text}")
+        current_id = _id_from_reference(detail.get("replied_to"))
+    return "\n".join(reversed(items[-limit:]))[:3000]
+
+
 def _try_auto_reply(record: dict[str, str]) -> bool:
     with LOCK:
         state = _auto_state()
         if not state["enabled"] or state["daily_count"] >= AUTO_REPLY_DAILY_LIMIT:
             return False
     from generate_reply_draft import generate_reply_draft
-    result = generate_reply_draft(record["author"], record["comment_text"], post_text=record.get("post_text", ""))
+    result = generate_reply_draft(
+        record["author"], record["comment_text"],
+        post_text=record.get("post_text", ""),
+        conversation_text=record.get("conversation_text", ""),
+    )
     if not result.get("safe_to_draft"): return False
     draft = str(result["draft_reply"])
     publish_reply(record["reply_id"], draft)
@@ -269,7 +299,7 @@ def handle_event(event: dict[str, Any]) -> bool:
         record = {"event_id": str(event.get("id") or value.get("event_id") or reply_id), "reply_id": reply_id,
                   "thread_id": str(detail.get("thread_id") or root_post.get("id") or replied_to.get("id") or detail.get("media_id") or media.get("id") or ""),
                   "author": str(detail.get("username") or detail.get("author") or sender.get("username") or "未知"), "comment_text": str(detail.get("text") or ""),
-                  "post_text": "", "draft_reply": "", "status": "processing", "created_at": now(), "handled_at": ""}
+                  "post_text": "", "conversation_text": "", "draft_reply": "", "status": "processing", "created_at": now(), "handled_at": ""}
         self_username = os.getenv("THREADS_USERNAME", "humanpuddi").strip().lstrip("@").casefold()
         if record["author"].strip().lstrip("@").casefold() == self_username:
             print(f"[Webhook] 略過自己的留言：reply_id={reply_id}")
@@ -277,6 +307,7 @@ def handle_event(event: dict[str, Any]) -> bool:
         post_id, post_text = _original_post(record)
         if post_id: record["thread_id"] = post_id
         record["post_text"] = post_text
+        record["conversation_text"] = _conversation_context(reply_id, post_id)
         rows = _rows(); rows.append(record); _write(rows)
     try:
         try:
@@ -337,7 +368,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
             record = get_record(reply_id) if reply_id else None
             if not record:
                 self.send_error(404); return
-            payload = json.dumps({"reply_id": reply_id, "post_text": record.get("post_text", "")}, ensure_ascii=False).encode("utf-8")
+            payload = json.dumps({
+                "reply_id": reply_id,
+                "post_text": record.get("post_text", ""),
+                "conversation_text": record.get("conversation_text", ""),
+            }, ensure_ascii=False).encode("utf-8")
             self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.end_headers(); self.wfile.write(payload)
         elif path == "/auto-reply":
             if not _control_authorized(self.headers):
