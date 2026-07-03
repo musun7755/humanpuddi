@@ -157,6 +157,41 @@ def threads_get(reply_id: str) -> dict[str, Any]:
     return response.json()
 
 
+def _candidate_reply_ids(value: Any, parent_key: str = "") -> list[str]:
+    """蒐集 webhook 內可能的留言 ID，排除明確的作者帳號 ID。"""
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in {"from", "sender", "user", "author"}:
+                continue
+            if lowered in {"reply_id", "comment_id", "id", "media_id"} and isinstance(item, (str, int)):
+                found.append(str(item).strip())
+            found.extend(_candidate_reply_ids(item, lowered))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_candidate_reply_ids(item, parent_key))
+    return list(dict.fromkeys(item for item in found if item))
+
+
+def _resolve_reply_id(value: dict[str, Any]) -> str:
+    """以留言文字驗證候選 ID，避免把 webhook 的使用者 ID 當 reply_to_id。"""
+    expected_text = " ".join(str(value.get("text") or "").split())
+    token = _config("THREADS_ACCESS_TOKEN")
+    for candidate in _candidate_reply_ids(value):
+        response = requests.get(
+            f"{GRAPH_BASE}/{candidate}",
+            params={"fields": "id,text", "access_token": token},
+            timeout=20,
+        )
+        if not response.ok:
+            continue
+        actual_text = " ".join(str(response.json().get("text") or "").split())
+        if actual_text and (not expected_text or actual_text == expected_text):
+            return candidate
+    return ""
+
+
 def _id_from_reference(value: Any) -> str:
     if isinstance(value, dict):
         return str(value.get("id") or value.get("media_id") or "").strip()
@@ -218,8 +253,9 @@ def publish_reply(reply_id: str, text: str) -> None:
 
 def handle_event(event: dict[str, Any]) -> bool:
     value = event.get("value") if isinstance(event.get("value"), dict) else event
-    reply_id = str(value.get("reply_id") or value.get("comment_id") or value.get("id") or "").strip()
+    reply_id = _resolve_reply_id(value)
     if not reply_id:
+        print(f"[Webhook] 無法從事件確認可回覆的留言 ID；keys={list(value.keys())}")
         return False
     with LOCK:
         if get_record(reply_id):
