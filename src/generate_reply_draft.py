@@ -59,41 +59,41 @@ def generate_reply_draft(
     character = CHARACTER_FILE.read_text(encoding="utf-8")
     retry = ""
     if previous_draft.strip():
-        retry = f"\n上一版草稿：{previous_draft.strip()}\n請改用不同句型、反應角度與笑點，不要只換同義詞。\n"
-    original = post_text.strip() or "（未取得原貼文，禁止自行補背景）"
+        retry = f"\nPrevious draft: {previous_draft.strip()}\nUse a different sentence pattern, reaction angle, and joke mechanism. Do not merely replace words with synonyms.\n"
+    original = post_text.strip() or "(Original post unavailable. Do not invent context.)"
     internet_language = _recent_internet_language()
-    prompt = f"""原貼文：{original}
-留言作者：{author}
-留言內容：{comment_text}
+    prompt = f"""Original post: {original}
+Comment author: {author}
+Comment: {comment_text}
 {retry}
 
-判斷這則公開留言是否適合產生草稿。普通稱讚、玩笑、輕問題可以；爭議、攻擊、色情、政治、新聞、醫療、法律、金融或危險內容不可。
+Decide whether this public comment is safe for an automatic draft. Ordinary praise, jokes, and light questions are allowed. Controversy, attacks, sexual content, politics, news, medical, legal, financial, or dangerous content requires manual handling.
 
-適合時寫一則台灣 Threads 口吻的赫湦短回覆：
-- 通常 8～60 字，最多兩個短句，不要比簡短原留言長很多。
-- 必須同時理解原貼文與留言，回覆兩者真正形成的上下文；不能只抓留言表面，也不能新增原文沒有的背景。
-- 回覆必須明確接住留言的關鍵物件、動作或意思，讓人一眼看得出是在回這句；再給一個自然反應。沒有好笑點就不要硬演。
-- 少用完整標點。不要句號，避免逗號與連續驚嘆號；用自然留白或換行呈現台灣聊天節奏。
-- 一個反應用單行；真的有前後兩個節拍時才分成兩行。最多兩行，不要為排版硬切碎句。
-- 使用剛好一個符合語氣的常見 Emoji，不要堆 Emoji。
-- 可以適量使用台灣 2026 網路口語、梗語或諧音梗，但必須貼合當下內容、讀起來像真的會講；沒有適合的梗就用自然口語，禁止硬塞、過時裝年輕或捏造流行語。
-- 禁止戲劇化開場、浮誇自責、客服語氣、制式問句、解釋笑點與假裝很熟。
-- 禁止新增原留言沒有的事實、建議或因果。不要把對方當私人戀愛對象。
+When safe, write one short reply from 赫湦 in natural Taiwanese Threads voice:
+- Usually 8–60 Traditional Chinese characters and no more than two short sentences. Do not greatly exceed a short source comment.
+- Understand both the original post and the comment. Reply to their actual combined context. Do not react only to the surface wording and do not invent background.
+- Clearly catch the comment's key object, action, or meaning so the target is obvious, then add one natural reaction. Do not force a joke when none fits.
+- Use sparse punctuation. Avoid periods, excessive commas, and repeated exclamation marks. Use natural spacing or a line break for Taiwanese chat rhythm.
+- Use one line for one reaction. Use two lines only when there are genuinely two beats. Never fragment a sentence merely for layout.
+- Use exactly one common Emoji that fits the tone. Do not stack Emoji.
+- Taiwanese 2026 internet language, meme phrasing, sound-based puns, or Taiwanese Hokkien may appear only when it fits the context, remains understandable, and sounds natural. Otherwise use ordinary Taiwanese speech. Never force slang or Hokkien, imitate youth language, use stale slang, invent uncertain Hokkien wording, or fabricate a trend.
+- Do not use a theatrical opening, exaggerated self-blame, customer-service voice, formulaic question, explained joke, or false intimacy.
+- Do not add facts, advice, or causality absent from the source. Never treat the commenter as a private romantic partner.
 
-節奏校準：
-留言「下次吃泡麵比較不容易噴喔」時，可用「這次先算我繳學費了🥲」這種短反應；不要寫成「糟糕，我罪孽深重！但我先說……」這種完整表演。校準句只示範節奏，不可固定套用。
-留言「好可愛」可用「被你看到了🫣」；留言「笑死」可用「先不要笑 我還在收拾😭」。不要複製範例，保留這種短、直覺、接得到原話的節奏。
+Rhythm calibration:
+For `下次吃泡麵比較不容易噴喔`, a short reaction such as `這次先算我繳學費了🥲` fits. Do not turn it into a full performance such as `糟糕，我罪孽深重！但我先說……`. These examples demonstrate rhythm only and must not become templates.
+For `好可愛`, `被你看到了🫣` shows the target rhythm. For `笑死`, `先不要笑 我還在收拾😭` does the same. Do not copy these examples.
 
-最近 14 天社群語言參考（只在真的適合時使用，不得照抄）：
+Recent 14-day social-language reference (use only when genuinely relevant; never copy directly):
 {internet_language}
 
-不適合時 safe_to_draft=false、draft_reply 留空，reason 簡述需要人工處理的原因。不要新增留言中沒有的事實。"""
+When unsafe, set safe_to_draft=false, leave draft_reply empty, and briefly explain the manual-review reason in Traditional Chinese. Do not add facts absent from the comment."""
     result = GeminiClient().generate_json(
         prompt=prompt,
         response_schema=SCHEMA,
-        system_instruction=f"""最高優先規則：你寫的是一則台灣 Threads 留言回覆，不是貼文、段子或角色獨白。必須先理解原貼文與留言的完整上下文，再用短、口語、自然留白或換行、少標點、剛好一個 Emoji 的方式直接回應；禁止硬演、浮誇自責、憑空建議與無關反應。角色設定只能調整語氣，不得覆蓋以上規則。
+        system_instruction=f"""Highest-priority rule: Write one Taiwanese Threads comment reply, not a standalone post, comedy routine, or character monologue. Understand the full context formed by the original post and comment before replying. Respond directly in short, spoken Taiwanese Traditional Chinese with natural spacing or line breaks, sparse punctuation, and exactly one Emoji. Never overperform, use exaggerated self-blame, invent advice, or give an unrelated reaction. Character settings may adjust tone but cannot override these rules.
 
-以下是角色設定：
+Character configuration:
 {character}""",
     )
     safe = bool(result.get("safe_to_draft"))

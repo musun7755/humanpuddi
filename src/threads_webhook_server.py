@@ -20,9 +20,11 @@ from dotenv import load_dotenv
 PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
 ENV_FILE: Final = PROJECT_ROOT / ".env"
 LOG_FILE: Final = PROJECT_ROOT / "data" / "reply_log.csv"
+AUTO_STATE_FILE: Final = PROJECT_ROOT / "data" / "auto_reply_state.json"
 FIELDS: Final = ["event_id", "reply_id", "thread_id", "author", "comment_text", "draft_reply", "status", "created_at", "handled_at"]
 GRAPH_BASE: Final = "https://graph.threads.net/v1.0"
 LOCK = threading.RLock()
+AUTO_REPLY_DAILY_LIMIT: Final = 20
 
 
 def now() -> str:
@@ -35,6 +37,33 @@ def _config(name: str) -> str:
     if not value:
         raise RuntimeError(f"尚未設定 {name}。")
     return value
+
+
+def _auto_state() -> dict[str, Any]:
+    today = datetime.now(timezone.utc).date().isoformat()
+    default: dict[str, Any] = {"enabled": False, "date": today, "daily_count": 0}
+    try:
+        state = json.loads(AUTO_STATE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(state, dict): return default
+    except (OSError, json.JSONDecodeError):
+        return default
+    if state.get("date") != today:
+        state["date"], state["daily_count"] = today, 0
+    state["enabled"] = bool(state.get("enabled", False))
+    state["daily_count"] = int(state.get("daily_count", 0))
+    return state
+
+
+def _save_auto_state(state: dict[str, Any]) -> None:
+    AUTO_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = AUTO_STATE_FILE.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(AUTO_STATE_FILE)
+
+
+def _control_authorized(headers: Any) -> bool:
+    secret = os.getenv("AUTO_REPLY_CONTROL_SECRET", "").strip()
+    return bool(secret) and hmac.compare_digest(str(headers.get("Authorization", "")), f"Bearer {secret}")
 
 
 def _rows() -> list[dict[str, str]]:
@@ -113,11 +142,42 @@ def _telegram_review(record: dict[str, str]) -> bool:
     return True
 
 
+def _telegram_status(text: str) -> None:
+    token, chat_id = _config("TELEGRAM_BOT_TOKEN"), _config("TELEGRAM_CHAT_ID")
+    response = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": chat_id, "text": text[:4096]}, timeout=15)
+    if not response.ok:
+        raise RuntimeError(f"Telegram 通知失敗 HTTP {response.status_code}: {response.text}")
+
+
 def threads_get(reply_id: str) -> dict[str, Any]:
     response = requests.get(f"{GRAPH_BASE}/{reply_id}", params={"fields": "id,text,username,timestamp,root_post,replied_to", "access_token": _config("THREADS_ACCESS_TOKEN")}, timeout=20)
     if not response.ok:
         raise RuntimeError(f"Threads 讀取留言失敗 HTTP {response.status_code}: {response.text}")
     return response.json()
+
+
+def _original_post_text(record: dict[str, str]) -> str:
+    thread_id = record.get("thread_id", "").strip()
+    if not thread_id: return ""
+    response = requests.get(f"{GRAPH_BASE}/{thread_id}", params={"fields": "id,text", "access_token": _config("THREADS_ACCESS_TOKEN")}, timeout=20)
+    return str(response.json().get("text", "")) if response.ok else ""
+
+
+def _try_auto_reply(record: dict[str, str]) -> bool:
+    with LOCK:
+        state = _auto_state()
+        if not state["enabled"] or state["daily_count"] >= AUTO_REPLY_DAILY_LIMIT:
+            return False
+    from generate_reply_draft import generate_reply_draft
+    result = generate_reply_draft(record["author"], record["comment_text"], post_text=_original_post_text(record))
+    if not result.get("safe_to_draft"): return False
+    draft = str(result["draft_reply"])
+    publish_reply(record["reply_id"], draft)
+    with LOCK:
+        state = _auto_state(); state["daily_count"] += 1; _save_auto_state(state)
+    update_record(record["reply_id"], draft_reply=draft, status="auto_replied", handled_at=now())
+    _telegram_status(f"Threads 已自動回覆\n\n作者：{record['author']}\n留言：{record['comment_text']}\n\n回覆：{draft}")
+    return True
 
 
 def publish_reply(reply_id: str, text: str) -> None:
@@ -154,6 +214,15 @@ def handle_event(event: dict[str, Any]) -> bool:
             return False
         rows = _rows(); rows.append(record); _write(rows)
     try:
+        try:
+            if _try_auto_reply(record):
+                return True
+        except Exception as exc:
+            print(f"[自動回覆] 失敗，改送人工處理：{exc}")
+            try:
+                _telegram_status(f"Threads 自動回覆失敗，已改送人工處理\n\n作者：{record['author']}\n留言：{record['comment_text']}\n\n錯誤：{exc}")
+            except Exception:
+                pass
         try:
             _telegram_review(record)
         except Exception as exc:
@@ -195,7 +264,14 @@ def process_payload(payload: dict[str, Any]) -> None:
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         query = parse_qs(urlparse(self.path).query)
-        if not query and urlparse(self.path).path in {"/", "/health"}:
+        path = urlparse(self.path).path
+        if path == "/auto-reply":
+            if not _control_authorized(self.headers):
+                self.send_error(401); return
+            with LOCK:
+                payload = json.dumps(_auto_state()).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(payload)
+        elif not query and path in {"/", "/health"}:
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
@@ -207,6 +283,21 @@ class WebhookHandler(BaseHTTPRequestHandler):
             send_discord_error("Meta webhook 驗證失敗：verify token 不符。")
 
     def do_POST(self) -> None:
+        if urlparse(self.path).path == "/auto-reply":
+            if not _control_authorized(self.headers):
+                self.send_error(401); return
+            try:
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                data = json.loads(body)
+                if not isinstance(data.get("enabled"), bool):
+                    raise ValueError("enabled must be boolean")
+                with LOCK:
+                    state = _auto_state(); state["enabled"] = data["enabled"]; _save_auto_state(state)
+                payload = json.dumps(state).encode()
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(payload)
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.send_error(400, str(exc))
+            return
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         signature = self.headers.get("X-Hub-Signature-256", "")
         expected = "sha256=" + hmac.new(os.getenv("THREADS_APP_SECRET", "").encode(), body, hashlib.sha256).hexdigest()
