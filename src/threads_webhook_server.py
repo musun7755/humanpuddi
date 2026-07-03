@@ -229,7 +229,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
 def main() -> int:
     load_dotenv(ENV_FILE, override=False)
     try:
-        for name in ("THREADS_APP_SECRET", "THREADS_WEBHOOK_VERIFY_TOKEN", "DISCORD_BOT_TOKEN", "DISCORD_REVIEW_CHANNEL_ID"):
+        for name in (
+            "THREADS_APP_SECRET",
+            "THREADS_WEBHOOK_VERIFY_TOKEN",
+            "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_CHAT_ID",
+        ):
             _config(name)
         # Render 等雲端平台會透過 PORT 指定對外監聽埠；本機仍使用 8787。
         port = int(os.getenv("PORT") or os.getenv("THREADS_WEBHOOK_PORT", "8787"))
