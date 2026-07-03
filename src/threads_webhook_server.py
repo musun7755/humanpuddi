@@ -21,7 +21,7 @@ PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
 ENV_FILE: Final = PROJECT_ROOT / ".env"
 LOG_FILE: Final = PROJECT_ROOT / "data" / "reply_log.csv"
 AUTO_STATE_FILE: Final = PROJECT_ROOT / "data" / "auto_reply_state.json"
-FIELDS: Final = ["event_id", "reply_id", "thread_id", "author", "comment_text", "draft_reply", "status", "created_at", "handled_at"]
+FIELDS: Final = ["event_id", "reply_id", "thread_id", "author", "comment_text", "post_text", "draft_reply", "status", "created_at", "handled_at"]
 GRAPH_BASE: Final = "https://graph.threads.net/v1.0"
 LOCK = threading.RLock()
 AUTO_REPLY_DAILY_LIMIT: Final = 20
@@ -41,7 +41,8 @@ def _config(name: str) -> str:
 
 def _auto_state() -> dict[str, Any]:
     today = datetime.now(timezone.utc).date().isoformat()
-    default: dict[str, Any] = {"enabled": False, "date": today, "daily_count": 0}
+    # Render 的暫存檔在重新部署後可能消失；依使用者設定，無狀態時預設開啟。
+    default: dict[str, Any] = {"enabled": True, "date": today, "daily_count": 0}
     try:
         state = json.loads(AUTO_STATE_FILE.read_text(encoding="utf-8"))
         if not isinstance(state, dict): return default
@@ -156,11 +157,36 @@ def threads_get(reply_id: str) -> dict[str, Any]:
     return response.json()
 
 
-def _original_post_text(record: dict[str, str]) -> str:
-    thread_id = record.get("thread_id", "").strip()
-    if not thread_id: return ""
-    response = requests.get(f"{GRAPH_BASE}/{thread_id}", params={"fields": "id,text", "access_token": _config("THREADS_ACCESS_TOKEN")}, timeout=20)
-    return str(response.json().get("text", "")) if response.ok else ""
+def _id_from_reference(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("id") or value.get("media_id") or "").strip()
+    if isinstance(value, (str, int)):
+        return str(value).strip()
+    return ""
+
+
+def _original_post(record: dict[str, str]) -> tuple[str, str]:
+    """優先使用 webhook thread_id；缺少時以留言 ID 反查 root_post。"""
+    candidates = [record.get("thread_id", "").strip()]
+    try:
+        detail = threads_get(record["reply_id"])
+        candidates.extend([
+            _id_from_reference(detail.get("root_post")),
+            _id_from_reference(detail.get("replied_to")),
+            _id_from_reference(detail.get("media")),
+            str(detail.get("thread_id") or detail.get("media_id") or "").strip(),
+        ])
+    except Exception as exc:
+        print(f"[原貼文] 留言反查失敗：{exc}")
+    for post_id in dict.fromkeys(item for item in candidates if item):
+        response = requests.get(
+            f"{GRAPH_BASE}/{post_id}",
+            params={"fields": "id,text", "access_token": _config("THREADS_ACCESS_TOKEN")},
+            timeout=20,
+        )
+        if response.ok and str(response.json().get("text", "")).strip():
+            return post_id, str(response.json()["text"]).strip()
+    return "", ""
 
 
 def _try_auto_reply(record: dict[str, str]) -> bool:
@@ -169,7 +195,7 @@ def _try_auto_reply(record: dict[str, str]) -> bool:
         if not state["enabled"] or state["daily_count"] >= AUTO_REPLY_DAILY_LIMIT:
             return False
     from generate_reply_draft import generate_reply_draft
-    result = generate_reply_draft(record["author"], record["comment_text"], post_text=_original_post_text(record))
+    result = generate_reply_draft(record["author"], record["comment_text"], post_text=record.get("post_text", ""))
     if not result.get("safe_to_draft"): return False
     draft = str(result["draft_reply"])
     publish_reply(record["reply_id"], draft)
@@ -207,11 +233,14 @@ def handle_event(event: dict[str, Any]) -> bool:
         record = {"event_id": str(event.get("id") or value.get("event_id") or reply_id), "reply_id": reply_id,
                   "thread_id": str(detail.get("thread_id") or root_post.get("id") or replied_to.get("id") or detail.get("media_id") or media.get("id") or ""),
                   "author": str(detail.get("username") or detail.get("author") or sender.get("username") or "未知"), "comment_text": str(detail.get("text") or ""),
-                  "draft_reply": "", "status": "processing", "created_at": now(), "handled_at": ""}
+                  "post_text": "", "draft_reply": "", "status": "processing", "created_at": now(), "handled_at": ""}
         self_username = os.getenv("THREADS_USERNAME", "humanpuddi").strip().lstrip("@").casefold()
         if record["author"].strip().lstrip("@").casefold() == self_username:
             print(f"[Webhook] 略過自己的留言：reply_id={reply_id}")
             return False
+        post_id, post_text = _original_post(record)
+        if post_id: record["thread_id"] = post_id
+        record["post_text"] = post_text
         rows = _rows(); rows.append(record); _write(rows)
     try:
         try:
@@ -265,7 +294,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         query = parse_qs(urlparse(self.path).query)
         path = urlparse(self.path).path
-        if path == "/auto-reply":
+        if path == "/reply-context":
+            if not _control_authorized(self.headers):
+                self.send_error(401); return
+            reply_id = query.get("id", [""])[0].strip()
+            record = get_record(reply_id) if reply_id else None
+            if not record:
+                self.send_error(404); return
+            payload = json.dumps({"reply_id": reply_id, "post_text": record.get("post_text", "")}, ensure_ascii=False).encode("utf-8")
+            self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.end_headers(); self.wfile.write(payload)
+        elif path == "/auto-reply":
             if not _control_authorized(self.headers):
                 self.send_error(401); return
             with LOCK:

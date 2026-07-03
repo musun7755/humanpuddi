@@ -18,6 +18,9 @@ from dotenv import load_dotenv
 from PIL import Image
 
 from generate_reply_draft import generate_reply_draft
+from content_chat import accept as accept_content, end_session as end_content_session
+from content_chat import generate as generate_content, load_session as load_content_session
+from telegram_notify import send_telegram_message
 from threads_publish import publish_ghost_post, publish_reply
 
 ROOT: Final = Path(__file__).resolve().parent.parent
@@ -89,19 +92,49 @@ def edit(chat_id: int, message_id: int, data: dict[str, Any], status: str, butto
         text=render(data, status), reply_markup=keyboard(str(data["reply_id"])) if buttons else {"inline_keyboard": []})
 
 
-def parse_source(text: str, reply_id: str) -> tuple[str, str]:
+def parse_source(text: str, reply_id: str) -> tuple[str, str, str]:
     author = "未知"
     comment = ""
+    post_text = ""
     for line in text.splitlines():
         if line.startswith("作者："):
             author = line.split("：", 1)[1].strip()
         elif line.startswith("內容："):
             comment = line.split("：", 1)[1].strip()
-    return author, comment
+        elif line.startswith("原貼文："):
+            post_text = line.split("：", 1)[1].strip()
+    return author, comment, post_text
+
+
+def fetch_post_text(reply_id: str) -> str:
+    url = os.getenv("RENDER_CONTROL_URL", "https://humanpuddi.onrender.com").strip().rstrip("/")
+    secret = os.getenv("AUTO_REPLY_CONTROL_SECRET", "").strip()
+    if not secret:
+        return ""
+    response = requests.get(
+        f"{url}/reply-context",
+        params={"id": reply_id},
+        headers={"Authorization": f"Bearer {secret}"},
+        timeout=30,
+    )
+    if not response.ok:
+        return ""
+    return str(response.json().get("post_text", "")).strip()
 
 
 def answer(callback_id: str, text: str = "") -> None:
     api("answerCallbackQuery", callback_query_id=callback_id, text=text[:200], show_alert=False)
+
+
+def content_keyboard() -> dict[str, Any]:
+    return {"inline_keyboard": [[
+        {"text": "重想一版", "callback_data": "tg:content:rethink:current"},
+        {"text": "採用存檔", "callback_data": "tg:content:accept:current"},
+    ], [{"text": "結束討論", "callback_data": "tg:content:end:current"}]]}
+
+
+def content_text(data: dict[str, Any]) -> str:
+    return (f"文案討論｜{data['topic']}\n\n文案\n{data['thread_text']}\n\nFlow prompt\n{data['flow_prompt']}\n\n方向：{data['note']}\n\n直接傳訊息即可繼續修改")[:4096]
 
 
 def handle_callback(query: dict[str, Any], manual: dict[int, str]) -> None:
@@ -115,6 +148,25 @@ def handle_callback(query: dict[str, Any], manual: dict[int, str]) -> None:
     section, action, item_id = parts[1], parts[2], parts[3]
     if str(chat_id) != config("TELEGRAM_CHAT_ID"):
         answer(callback_id, "未授權"); return
+    if section == "content":
+        try:
+            if action == "rethink":
+                answer(callback_id, "正在重想…")
+                api("editMessageText", chat_id=chat_id, message_id=message_id, text="正在重想文案與 Flow prompt…")
+                data = generate_content(chat_id, rethink=True)
+                api("editMessageText", chat_id=chat_id, message_id=message_id, text=content_text(data), reply_markup=content_keyboard())
+            elif action == "accept":
+                path = accept_content(chat_id); answer(callback_id, "已採用存檔")
+                api("editMessageText", chat_id=chat_id, message_id=message_id, text=f"已採用並存檔\n{path.name}")
+            elif action == "end":
+                end_content_session(chat_id); answer(callback_id, "已結束")
+                api("editMessageText", chat_id=chat_id, message_id=message_id, text="文案討論已結束，不會發布。")
+            else: answer(callback_id, "不支援的操作")
+        except Exception as exc:
+            try: answer(callback_id, f"失敗：{exc}")
+            except Exception: pass
+            api("sendMessage", chat_id=chat_id, text=f"文案處理失敗：{exc}")
+        return
     if section == "daily" and action == "regenerate":
         answer(callback_id, "正在重新產生今日候選…")
         api("editMessageText", chat_id=chat_id, message_id=message_id,
@@ -159,13 +211,15 @@ def handle_callback(query: dict[str, Any], manual: dict[int, str]) -> None:
             if path.exists():
                 data = load(reply_id)
             else:
-                author, comment = parse_source(str(message.get("text", "")), reply_id)
-                result = generate_reply_draft(author, comment)
+                author, comment, post_text = parse_source(str(message.get("text", "")), reply_id)
+                if not post_text:
+                    post_text = fetch_post_text(reply_id)
+                result = generate_reply_draft(author, comment, post_text=post_text)
                 if not result.get("safe_to_draft"):
                     api("sendMessage", chat_id=chat_id,
                         text=f"這則留言建議人工判斷：{result.get('reason', '請手動處理')}")
                     return
-                data = {"reply_id": reply_id, "author": author, "comment_text": comment,
+                data = {"reply_id": reply_id, "author": author, "comment_text": comment, "post_text": post_text,
                         "draft_reply": str(result["draft_reply"]), "status": "pending"}
                 save(data)
             edit(chat_id, message_id, data, "尚未發布")
@@ -177,6 +231,7 @@ def handle_callback(query: dict[str, Any], manual: dict[int, str]) -> None:
             answer(callback_id, "正在重新產生草稿…")
             edit(chat_id, message_id, data, "正在重新產生草稿…", False)
             result = generate_reply_draft(str(data.get("author", "未知")), str(data.get("comment_text", "")),
+                                          post_text=str(data.get("post_text", "")),
                                           previous_draft=str(data.get("draft_reply", "")))
             if not result.get("safe_to_draft"):
                 edit(chat_id, message_id, data, str(result.get("reason", "建議人工判斷")), True); return
@@ -208,10 +263,31 @@ def handle_callback(query: dict[str, Any], manual: dict[int, str]) -> None:
 
 def handle_message(message: dict[str, Any], manual: dict[int, str]) -> None:
     chat_id = int((message.get("chat") or {}).get("id", 0))
-    if str(chat_id) != config("TELEGRAM_CHAT_ID") or chat_id not in manual:
+    if str(chat_id) != config("TELEGRAM_CHAT_ID"):
         return
     text = str(message.get("text", "")).strip()
     if not text:
+        return
+    if text in {"/結束文案", "/endcopy"}:
+        end_content_session(chat_id); api("sendMessage", chat_id=chat_id, text="文案討論已結束，不會發布。"); return
+    if text.startswith("/文案") or text.startswith("/copy"):
+        topic = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) == 2 else ""
+        if not topic:
+            api("sendMessage", chat_id=chat_id, text="請這樣輸入：\n/文案 赫湦第一次自己煮泡麵，結果水加太少"); return
+        api("sendMessage", chat_id=chat_id, text="正在依題材產生文案與 Flow prompt…")
+        try:
+            data = generate_content(chat_id, topic=topic)
+            api("sendMessage", chat_id=chat_id, text=content_text(data), reply_markup=content_keyboard())
+        except Exception as exc: api("sendMessage", chat_id=chat_id, text=f"產生失敗：{exc}")
+        return
+    if load_content_session(chat_id) and chat_id not in manual:
+        api("sendMessage", chat_id=chat_id, text="正在依你的意見修改…")
+        try:
+            data = generate_content(chat_id, feedback=text)
+            api("sendMessage", chat_id=chat_id, text=content_text(data), reply_markup=content_keyboard())
+        except Exception as exc: api("sendMessage", chat_id=chat_id, text=f"修改失敗：{exc}")
+        return
+    if chat_id not in manual:
         return
     reply_id = manual.pop(chat_id)
     data = load(reply_id)
@@ -298,6 +374,18 @@ def main() -> int:
     worker = threading.Thread(target=poll_updates, args=(stop_event,), daemon=True)
     worker.start()
     print("[完成] Telegram 審核 Bot 已啟動；右下角系統匣可查看狀態。")
+    try:
+        send_telegram_message(
+            "HexingBot Telegram Bot 已啟動。\n"
+            "候選、留言審核、文案討論、重新發想及系統通知服務已連線。\n"
+            "傳送 /文案 加上題材，即可開始多輪討論。"
+        )
+    except Exception as exc:
+        print(f"[Telegram] 啟動通知失敗：{exc}")
+    threading.Timer(
+        1.0,
+        lambda: tray.icon.notify("Telegram Bot 已連線。", "HexingBot"),
+    ).start()
     tray.icon.run()
     stop_event.set()
     worker.join(timeout=POLL_TIMEOUT + 2)
