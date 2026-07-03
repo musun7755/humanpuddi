@@ -1,23 +1,7 @@
-"""HexingBot 的 Discord Webhook 通知工具。"""
+"""相容舊介面的 Telegram 通知路由。"""
 
-from pathlib import Path
 from typing import Final
-import os
-import time
-
-import requests
-from dotenv import load_dotenv
-
-
-PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
-ENV_FILE: Final = PROJECT_ROOT / ".env"
-
-WEBHOOK_ENV_NAMES: Final = {
-    "log": "DISCORD_WEBHOOK_LOG",
-    "error": "DISCORD_WEBHOOK_ERROR",
-    "published": "DISCORD_WEBHOOK_PUBLISHED",
-    "review": "DISCORD_WEBHOOK_REVIEW",
-}
+SUPPORTED_CHANNELS: Final = {"log", "error", "published", "review"}
 
 DISCORD_MESSAGE_LIMIT: Final = 2000
 DISCORD_CHUNK_SIZE: Final = 1800
@@ -32,8 +16,8 @@ REGENERATE_CUSTOM_ID: Final = "hexing:regenerate_today"
 def send_discord_message(channel: str, content: str) -> None:
     """相容舊呼叫名稱；通知現在只送 Telegram。"""
     normalized_channel = channel.strip().lower()
-    if normalized_channel not in WEBHOOK_ENV_NAMES:
-        supported = ", ".join(WEBHOOK_ENV_NAMES)
+    if normalized_channel not in SUPPORTED_CHANNELS:
+        supported = ", ".join(sorted(SUPPORTED_CHANNELS))
         raise ValueError(
             f"不支援的 channel：{channel!r}。支援的值為：{supported}。"
         )

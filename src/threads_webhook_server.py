@@ -113,31 +113,6 @@ def _telegram_review(record: dict[str, str]) -> bool:
     return True
 
 
-def _discord_review(record: dict[str, str], manual_reason: str = "") -> None:
-    """通知本機 Discord Bot，讓它自動產生一則待審回覆草稿。"""
-    token, channel = _config("DISCORD_BOT_TOKEN"), _config("DISCORD_REVIEW_CHANNEL_ID")
-    original_text = ""
-    if record.get("thread_id"):
-        try:
-            original_text = str(threads_get(record["thread_id"]).get("text", "")).strip()
-        except Exception as exc:
-            print(f"[Webhook] 無法讀取原貼文，仍繼續通知：{exc}")
-    fields = [
-        {"name": "留言作者", "value": record["author"][:1024]},
-        {"name": "留言內容", "value": record["comment_text"][:1024]},
-    ]
-    if original_text:
-        fields.insert(0, {"name": "原貼文", "value": original_text[:1024]})
-    payload = {
-        "embeds": [{"title": "Threads 新留言", "color": 0x00A67E,
-                    "fields": fields,
-                    "footer": {"text": f"正在產生回覆草稿｜reply_id:{record['reply_id']}"}}],
-    }
-    response = requests.post(f"https://discord.com/api/v10/channels/{channel}/messages", headers={"Authorization": f"Bot {token}"}, json=payload, timeout=15)
-    if not response.ok:
-        raise RuntimeError(f"Discord review 失敗 HTTP {response.status_code}: {response.text}")
-
-
 def threads_get(reply_id: str) -> dict[str, Any]:
     response = requests.get(f"{GRAPH_BASE}/{reply_id}", params={"fields": "id,text,username,timestamp,root_post,replied_to", "access_token": _config("THREADS_ACCESS_TOKEN")}, timeout=20)
     if not response.ok:
