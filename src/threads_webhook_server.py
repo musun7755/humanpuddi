@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -276,8 +277,45 @@ def publish_reply(reply_id: str, text: str) -> None:
     create = requests.post(f"{GRAPH_BASE}/{user_id}/threads", data={"media_type": "TEXT", "text": text, "reply_to_id": reply_id, "access_token": token}, timeout=20)
     if not create.ok or not create.json().get("id"):
         raise RuntimeError(f"Threads 建立回覆失敗 HTTP {create.status_code}: {create.text}")
-    publish = requests.post(f"{GRAPH_BASE}/{user_id}/threads_publish", data={"creation_id": create.json()["id"], "access_token": token}, timeout=20)
-    if not publish.ok:
+    creation_id = str(create.json()["id"])
+    for _ in range(12):
+        status_response = requests.get(
+            f"{GRAPH_BASE}/{creation_id}",
+            params={"fields": "status,error_message", "access_token": token},
+            timeout=20,
+        )
+        if not status_response.ok:
+            raise RuntimeError(
+                f"Threads 查詢回覆處理狀態失敗 HTTP {status_response.status_code}: {status_response.text}"
+            )
+        status_body = status_response.json()
+        status = str(status_body.get("status", "")).upper()
+        if status == "FINISHED":
+            break
+        if status in {"ERROR", "EXPIRED"}:
+            raise RuntimeError(
+                f"Threads 回覆 container 處理失敗：{status_body.get('error_message') or status}"
+            )
+        time.sleep(5)
+    else:
+        raise RuntimeError("Threads 等待回覆 container 處理逾時，尚未發布。")
+
+    for attempt in range(3):
+        publish = requests.post(
+            f"{GRAPH_BASE}/{user_id}/threads_publish",
+            data={"creation_id": creation_id, "access_token": token},
+            timeout=20,
+        )
+        if publish.ok:
+            return
+        try:
+            error = publish.json().get("error", {})
+            retryable = error.get("code") == 24 or error.get("error_subcode") == 4279009
+        except (ValueError, AttributeError):
+            retryable = False
+        if retryable and attempt < 2:
+            time.sleep(3)
+            continue
         raise RuntimeError(f"Threads 發布回覆失敗 HTTP {publish.status_code}: {publish.text}")
 
 
