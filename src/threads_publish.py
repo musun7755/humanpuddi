@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import time
 from pathlib import Path
 from typing import Final
 
 import requests
 from dotenv import load_dotenv
+from memory_store import record_approved_reply, record_published_post
 
 PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
 ENV_FILE: Final = PROJECT_ROOT / ".env"
@@ -149,6 +151,12 @@ def publish_image_post(
     post_id = str(publish.json().get("id", "")).strip()
     if not post_id:
         raise ThreadsPublishError("Threads 已接受發布，但沒有回傳貼文 ID。")
+    try:
+        record_published_post(
+            post_id, text, "image" if len(urls) == 1 else "carousel", topic_tag
+        )
+    except (OSError, sqlite3.Error) as exc:
+        print(f"[記憶庫警告] 貼文已發布，但本機記錄失敗：{exc}")
     return post_id
 
 
@@ -188,10 +196,23 @@ def publish_ghost_post(text: str, topic_tag: str = "") -> str:
     post_id = str(publish.json().get("id", "")).strip()
     if not post_id:
         raise ThreadsPublishError("Threads 已接受限時貼文，但沒有回傳貼文 ID。")
+    try:
+        record_published_post(post_id, text, "ghost", topic_tag)
+    except (OSError, sqlite3.Error) as exc:
+        print(f"[記憶庫警告] 限時貼文已發布，但本機記錄失敗：{exc}")
     return post_id
 
 
-def publish_reply(reply_id: str, text: str) -> str:
+def publish_reply(
+    reply_id: str,
+    text: str,
+    *,
+    author: str = "",
+    comment_text: str = "",
+    post_text: str = "",
+    conversation_text: str = "",
+    source: str = "human_approved",
+) -> str:
     """人工批准後，發布一則 Threads 公開留言回覆。"""
     token = _config("THREADS_ACCESS_TOKEN")
     user_id = _config("THREADS_USER_ID")
@@ -227,4 +248,17 @@ def publish_reply(reply_id: str, text: str) -> str:
     post_id = str(publish.json().get("id", "")).strip()
     if not post_id:
         raise ThreadsPublishError("Threads 已接受留言回覆，但沒有回傳回覆 ID。")
+    try:
+        record_approved_reply(
+            post_id,
+            reply_id,
+            text,
+            author=author,
+            comment_text=comment_text,
+            post_text=post_text,
+            conversation_text=conversation_text,
+            source=source,
+        )
+    except (OSError, sqlite3.Error) as exc:
+        print(f"[記憶庫警告] 留言回覆已發布，但本機記錄失敗：{exc}")
     return post_id

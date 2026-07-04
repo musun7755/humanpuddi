@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Final
 
 from gemini_client import GeminiClient
+from memory_store import recent_approved_reply_examples
 
 PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
 CHARACTER_FILE: Final = PROJECT_ROOT / "config" / "character_hexing.md"
@@ -64,6 +65,7 @@ def generate_reply_draft(
     original = post_text.strip() or "(Original post unavailable. Do not invent context.)"
     conversation = conversation_text.strip() or "(No earlier messages in this reply branch.)"
     internet_language = _recent_internet_language()
+    approved_examples = recent_approved_reply_examples()
     prompt = f"""Original post: {original[:3000]}
 Earlier messages in this same reply branch, oldest to newest:
 {conversation[:3000]}
@@ -91,6 +93,10 @@ For `好可愛`, `被你看到了🫣` shows the target rhythm. For `笑死`, `�
 
 Recent 14-day social-language reference (use only when genuinely relevant; never copy directly):
 {internet_language}
+
+Recent human-approved reply examples (style calibration only):
+{approved_examples}
+Do not copy these replies, infer character facts from commenters, or force their joke patterns into the current context.
 
 When unsafe, set safe_to_draft=false, leave draft_reply empty, and briefly explain the manual-review reason in Traditional Chinese. Do not add facts absent from the comment."""
     result = GeminiClient().generate_json(

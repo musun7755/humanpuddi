@@ -106,11 +106,11 @@ def parse_source(text: str, reply_id: str) -> tuple[str, str, str]:
     return author, comment, post_text
 
 
-def fetch_post_text(reply_id: str) -> str:
+def fetch_reply_context(reply_id: str) -> tuple[str, str]:
     url = os.getenv("RENDER_CONTROL_URL", "https://humanpuddi.onrender.com").strip().rstrip("/")
     secret = os.getenv("AUTO_REPLY_CONTROL_SECRET", "").strip()
     if not secret:
-        return ""
+        return "", ""
     response = requests.get(
         f"{url}/reply-context",
         params={"id": reply_id},
@@ -118,8 +118,9 @@ def fetch_post_text(reply_id: str) -> str:
         timeout=30,
     )
     if not response.ok:
-        return ""
-    return str(response.json().get("post_text", "")).strip()
+        return "", ""
+    data = response.json()
+    return str(data.get("post_text", "")).strip(), str(data.get("conversation_text", "")).strip()
 
 
 def answer(callback_id: str, text: str = "") -> None:
@@ -212,14 +213,15 @@ def handle_callback(query: dict[str, Any], manual: dict[int, str]) -> None:
                 data = load(reply_id)
             else:
                 author, comment, post_text = parse_source(str(message.get("text", "")), reply_id)
+                conversation_text = ""
                 if not post_text:
-                    post_text = fetch_post_text(reply_id)
-                result = generate_reply_draft(author, comment, post_text=post_text)
+                    post_text, conversation_text = fetch_reply_context(reply_id)
+                result = generate_reply_draft(author, comment, post_text=post_text, conversation_text=conversation_text)
                 if not result.get("safe_to_draft"):
                     api("sendMessage", chat_id=chat_id,
                         text=f"這則留言建議人工判斷：{result.get('reason', '請手動處理')}")
                     return
-                data = {"reply_id": reply_id, "author": author, "comment_text": comment, "post_text": post_text,
+                data = {"reply_id": reply_id, "author": author, "comment_text": comment, "post_text": post_text, "conversation_text": conversation_text,
                         "draft_reply": str(result["draft_reply"]), "status": "pending"}
                 save(data)
             edit(chat_id, message_id, data, "尚未發布")
@@ -232,6 +234,7 @@ def handle_callback(query: dict[str, Any], manual: dict[int, str]) -> None:
             edit(chat_id, message_id, data, "正在重新產生草稿…", False)
             result = generate_reply_draft(str(data.get("author", "未知")), str(data.get("comment_text", "")),
                                           post_text=str(data.get("post_text", "")),
+                                          conversation_text=str(data.get("conversation_text", "")),
                                           previous_draft=str(data.get("draft_reply", "")))
             if not result.get("safe_to_draft"):
                 edit(chat_id, message_id, data, str(result.get("reason", "建議人工判斷")), True); return
@@ -248,7 +251,15 @@ def handle_callback(query: dict[str, Any], manual: dict[int, str]) -> None:
             data["status"] = "publishing"; save(data)
             edit(chat_id, message_id, data, "正在發布到 Threads…", False)
             try:
-                post_id = publish_reply(reply_id, str(data.get("draft_reply", "")))
+                post_id = publish_reply(
+                    reply_id,
+                    str(data.get("draft_reply", "")),
+                    author=str(data.get("author", "")),
+                    comment_text=str(data.get("comment_text", "")),
+                    post_text=str(data.get("post_text", "")),
+                    conversation_text=str(data.get("conversation_text", "")),
+                    source="telegram_human_approved",
+                )
             except Exception:
                 data["status"] = "pending"; save(data)
                 edit(chat_id, message_id, data, "發布失敗，可再次操作", True)

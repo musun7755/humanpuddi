@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import threading
+import requests
 from pathlib import Path
 from typing import Final
 
@@ -390,6 +391,9 @@ class HexingBot(discord.Client):
         self.event_loop = asyncio.get_running_loop()
         self.tree.add_command(publish_threads)
         self.tree.add_command(publish_ghost_thread)
+        self.tree.add_command(auto_reply_on)
+        self.tree.add_command(auto_reply_off)
+        self.tree.add_command(auto_reply_status)
         await self.tree.sync()
         # 全域 slash command 可能被 Discord 快取一段時間；同步到 review
         # 頻道所在伺服器，讓本專案的指令修改立即生效。
@@ -616,7 +620,14 @@ class HexingBot(discord.Client):
         _write_reply_state(path, data)
         try:
             post_id = await asyncio.to_thread(
-                publish_reply, reply_id, str(data["draft_reply"])
+                publish_reply,
+                reply_id,
+                str(data["draft_reply"]),
+                author=str(data.get("author", "")),
+                comment_text=str(data.get("comment_text", "")),
+                post_text=str(data.get("post_text", "")),
+                conversation_text=str(data.get("conversation_text", "")),
+                source="discord_human_approved",
             )
         except Exception as exc:
             data["status"] = "pending"
@@ -749,6 +760,48 @@ async def publish_ghost_thread(interaction: discord.Interaction) -> None:
         )
         return
     await interaction.response.send_modal(GhostTextModal())
+
+
+def _set_auto_reply(enabled: bool | None = None) -> dict[str, object]:
+    url = os.getenv("RENDER_CONTROL_URL", "https://humanpuddi.onrender.com").strip().rstrip("/")
+    secret = os.getenv("AUTO_REPLY_CONTROL_SECRET", "").strip()
+    if not secret:
+        raise RuntimeError("本機尚未設定 AUTO_REPLY_CONTROL_SECRET")
+    headers = {"Authorization": f"Bearer {secret}"}
+    if enabled is None:
+        response = requests.get(f"{url}/auto-reply", headers=headers, timeout=30)
+    else:
+        response = requests.post(f"{url}/auto-reply", headers=headers, json={"enabled": enabled}, timeout=30)
+    if not response.ok:
+        raise RuntimeError(f"Render HTTP {response.status_code}: {response.text[:300]}")
+    return response.json()
+
+
+async def _auto_reply_command(interaction: discord.Interaction, enabled: bool | None) -> None:
+    if str(interaction.channel_id) != os.getenv("DISCORD_REVIEW_CHANNEL_ID", "").strip():
+        await interaction.response.send_message("請在指定的 review 頻道使用這個指令。", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        state = await asyncio.to_thread(_set_auto_reply, enabled)
+        label = "開啟" if state.get("enabled") else "關閉"
+        await interaction.followup.send(f"Threads 自動回覆：{label}\n今日已自動回覆：{state.get('daily_count', 0)} 則", ephemeral=True)
+    except Exception as exc:
+        await interaction.followup.send(f"操作失敗：{exc}", ephemeral=True)
+
+
+@app_commands.command(name="自動回覆開啟", description="開啟 Threads 安全留言自動回覆")
+async def auto_reply_on(interaction: discord.Interaction) -> None:
+    await _auto_reply_command(interaction, True)
+
+
+@app_commands.command(name="自動回覆關閉", description="立即關閉 Threads 留言自動回覆")
+async def auto_reply_off(interaction: discord.Interaction) -> None:
+    await _auto_reply_command(interaction, False)
+
+
+@app_commands.command(name="自動回覆狀態", description="查看 Threads 自動回覆狀態")
+async def auto_reply_status(interaction: discord.Interaction) -> None:
+    await _auto_reply_command(interaction, None)
 
 
 def main() -> int:
