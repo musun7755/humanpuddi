@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 venv/
 .threads-chrome-profile/
+data/hexing_memory.sqlite3*
