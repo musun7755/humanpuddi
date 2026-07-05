@@ -25,7 +25,11 @@ AUTO_STATE_FILE: Final = PROJECT_ROOT / "data" / "auto_reply_state.json"
 FIELDS: Final = ["event_id", "reply_id", "thread_id", "author", "comment_text", "post_text", "conversation_text", "draft_reply", "status", "created_at", "handled_at"]
 GRAPH_BASE: Final = "https://graph.threads.net/v1.0"
 LOCK = threading.RLock()
+AUTO_REPLY_LOCK = threading.Lock()
 AUTO_REPLY_DAILY_LIMIT: Final = 20
+AUTO_REPLY_INTERVAL_SECONDS: Final = 60.0
+AUTO_REPLY_PER_AUTHOR_THREAD_LIMIT: Final = 3
+LAST_AUTO_REPLY_AT = 0.0
 
 
 def now() -> str:
@@ -252,24 +256,46 @@ def _conversation_context(reply_id: str, root_post_id: str = "", limit: int = 5)
 
 
 def _try_auto_reply(record: dict[str, str]) -> bool:
-    with LOCK:
-        state = _auto_state()
-        if not state["enabled"] or state["daily_count"] >= AUTO_REPLY_DAILY_LIMIT:
-            return False
-    from generate_reply_draft import generate_reply_draft
-    result = generate_reply_draft(
-        record["author"], record["comment_text"],
-        post_text=record.get("post_text", ""),
-        conversation_text=record.get("conversation_text", ""),
-    )
-    if not result.get("safe_to_draft"): return False
-    draft = str(result["draft_reply"])
-    publish_reply(record["reply_id"], draft)
-    with LOCK:
-        state = _auto_state(); state["daily_count"] += 1; _save_auto_state(state)
-    update_record(record["reply_id"], draft_reply=draft, status="auto_replied", handled_at=now())
-    _telegram_status(f"Threads 已自動回覆\n\n作者：{record['author']}\n留言：{record['comment_text']}\n\n回覆：{draft}")
-    return True
+    global LAST_AUTO_REPLY_AT
+    # Webhook 事件可能並行抵達；自動發布統一排隊，避免同時呼叫 API 或寫入記憶庫。
+    with AUTO_REPLY_LOCK:
+        with LOCK:
+            state = _auto_state()
+            if not state["enabled"] or state["daily_count"] >= AUTO_REPLY_DAILY_LIMIT:
+                return False
+            author = record["author"].strip().lstrip("@").casefold()
+            thread_id = record.get("thread_id", "").strip()
+            replied_count = sum(
+                1 for row in _rows()
+                if row.get("status") == "auto_replied"
+                and row.get("thread_id", "").strip() == thread_id
+                and row.get("author", "").strip().lstrip("@").casefold() == author
+            )
+            if thread_id and replied_count >= AUTO_REPLY_PER_AUTHOR_THREAD_LIMIT:
+                update_record(
+                    record["reply_id"], status="skipped_author_limit", handled_at=now()
+                )
+                return True
+
+        remaining = AUTO_REPLY_INTERVAL_SECONDS - (time.monotonic() - LAST_AUTO_REPLY_AT)
+        if remaining > 0:
+            time.sleep(remaining)
+
+        from generate_reply_draft import generate_reply_draft
+        result = generate_reply_draft(
+            record["author"], record["comment_text"],
+            post_text=record.get("post_text", ""),
+            conversation_text=record.get("conversation_text", ""),
+        )
+        if not result.get("safe_to_draft"): return False
+        draft = str(result["draft_reply"])
+        publish_reply(record["reply_id"], draft)
+        LAST_AUTO_REPLY_AT = time.monotonic()
+        with LOCK:
+            state = _auto_state(); state["daily_count"] += 1; _save_auto_state(state)
+        update_record(record["reply_id"], draft_reply=draft, status="auto_replied", handled_at=now())
+        _telegram_status(f"Threads 已自動回覆\n\n作者：{record['author']}\n留言：{record['comment_text']}\n\n回覆：{draft}")
+        return True
 
 
 def publish_reply(reply_id: str, text: str) -> None:
