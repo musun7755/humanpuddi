@@ -26,7 +26,7 @@ POLL_STATE_FILE: Final = PROJECT_ROOT / "data" / "auto_reply_poll_state.json"
 WEBHOOK_INBOX_FILE: Final = PROJECT_ROOT / "data" / "webhook_inbox.jsonl"
 FIELDS: Final = ["event_id", "reply_id", "thread_id", "author", "comment_text", "post_text", "conversation_text", "draft_reply", "status", "created_at", "handled_at"]
 GRAPH_BASE: Final = "https://graph.threads.net/v1.0"
-BUILD_VERSION: Final = "2026-07-11-no-reply-delay"
+BUILD_VERSION: Final = "2026-07-11-poll-first-run-fix"
 LOCK = threading.RLock()
 AUTO_REPLY_LOCK = threading.Lock()
 AUTO_REPLY_DAILY_LIMIT: Final = 20
@@ -435,12 +435,7 @@ def _poll_auto_reply_once() -> int:
 
     if not state["initialized"]:
         state["initialized"] = True
-        state["seen_reply_ids"] = list(discovered)
-        state["last_run_at"] = now()
-        state["last_error"] = ""
-        _save_poll_state(state)
-        print(f"[自動回覆輪詢] 已建立基準：{len(discovered)} 則既有留言。")
-        return 0
+        print(f"[自動回覆輪詢] 已建立基準：{len(discovered)} 則既有留言；新近留言候選 {len(candidates)} 則。")
 
     handled = 0
     for record in candidates:
