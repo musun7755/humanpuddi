@@ -25,7 +25,7 @@ AUTO_STATE_FILE: Final = PROJECT_ROOT / "data" / "auto_reply_state.json"
 WEBHOOK_INBOX_FILE: Final = PROJECT_ROOT / "data" / "webhook_inbox.jsonl"
 FIELDS: Final = ["event_id", "reply_id", "thread_id", "author", "comment_text", "post_text", "conversation_text", "draft_reply", "status", "created_at", "handled_at"]
 GRAPH_BASE: Final = "https://graph.threads.net/v1.0"
-BUILD_VERSION: Final = "2026-07-11-signature-inbox"
+BUILD_VERSION: Final = "2026-07-11-clean-diagnostics"
 LOCK = threading.RLock()
 AUTO_REPLY_LOCK = threading.Lock()
 AUTO_REPLY_DAILY_LIMIT: Final = 20
@@ -518,6 +518,30 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         query = parse_qs(urlparse(self.path).query)
         path = urlparse(self.path).path
+        if path == "/webhook" and query.get("hub.mode", [""])[0] == "subscribe":
+            verify_ok = hmac.compare_digest(
+                query.get("hub.verify_token", [""])[0],
+                os.getenv("THREADS_WEBHOOK_VERIFY_TOKEN", ""),
+            )
+            _remember_webhook(
+                {
+                    "method": "GET",
+                    "path": path,
+                    "hub_mode": query.get("hub.mode", [""])[0],
+                    "has_challenge": bool(query.get("hub.challenge", [""])[0]),
+                },
+                status="verify_accepted" if verify_ok else "verify_rejected",
+                note="" if verify_ok else "verify_token_mismatch",
+            )
+            if verify_ok:
+                body = query.get("hub.challenge", [""])[0].encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_error(403, "Webhook verification failed")
+            return
         if path == "/reply-context":
             if not _control_authorized(self.headers):
                 self.send_error(401); return
@@ -570,11 +594,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write(f"HexingBot Threads Webhook is running\n{BUILD_VERSION}".encode("utf-8"))
-        elif query.get("hub.mode", [""])[0] == "subscribe" and hmac.compare_digest(query.get("hub.verify_token", [""])[0], os.getenv("THREADS_WEBHOOK_VERIFY_TOKEN", "")):
-            body = query.get("hub.challenge", [""])[0].encode(); self.send_response(200); self.send_header("Content-Type", "text/plain"); self.end_headers(); self.wfile.write(body)
         else:
             self.send_error(403, "Webhook verification failed")
-            send_discord_error("Meta webhook 驗證失敗：verify token 不符。")
 
     def do_POST(self) -> None:
         if urlparse(self.path).path == "/auto-reply":
