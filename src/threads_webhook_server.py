@@ -27,7 +27,6 @@ GRAPH_BASE: Final = "https://graph.threads.net/v1.0"
 LOCK = threading.RLock()
 AUTO_REPLY_LOCK = threading.Lock()
 AUTO_REPLY_DAILY_LIMIT: Final = 20
-AUTO_REPLY_INTERVAL_SECONDS: Final = 60.0
 AUTO_REPLY_PER_AUTHOR_THREAD_LIMIT: Final = 3
 LAST_AUTO_REPLY_AT = 0.0
 
@@ -44,6 +43,17 @@ def _config(name: str) -> str:
     return value
 
 
+def _float_config(name: str, default: float) -> float:
+    load_dotenv(ENV_FILE, override=False)
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        raise RuntimeError(f"{name} 必須是秒數。")
+
+
 def _auto_state() -> dict[str, Any]:
     today = datetime.now(timezone.utc).date().isoformat()
     # Render 的暫存檔在重新部署後可能消失；依使用者設定，無狀態時預設開啟。
@@ -55,7 +65,7 @@ def _auto_state() -> dict[str, Any]:
         return default
     if state.get("date") != today:
         state["date"], state["daily_count"] = today, 0
-    state["enabled"] = bool(state.get("enabled", False))
+    state["enabled"] = bool(state.get("enabled", True))
     state["daily_count"] = int(state.get("daily_count", 0))
     return state
 
@@ -65,6 +75,18 @@ def _save_auto_state(state: dict[str, Any]) -> None:
     temporary = AUTO_STATE_FILE.with_suffix(".tmp")
     temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(AUTO_STATE_FILE)
+
+
+def _enable_auto_reply_on_startup() -> None:
+    """Render starts in auto-reply mode unless explicitly disabled by env."""
+    if os.getenv("AUTO_REPLY_START_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return
+    with LOCK:
+        state = _auto_state()
+        if not state.get("enabled"):
+            state["enabled"] = True
+            _save_auto_state(state)
+            print("[自動回覆] 服務啟動時已預設開啟。")
 
 
 def _control_authorized(headers: Any) -> bool:
@@ -277,8 +299,10 @@ def _try_auto_reply(record: dict[str, str]) -> bool:
                 )
                 return True
 
-        remaining = AUTO_REPLY_INTERVAL_SECONDS - (time.monotonic() - LAST_AUTO_REPLY_AT)
-        if remaining > 0:
+        interval = _float_config("AUTO_REPLY_INTERVAL_SECONDS", 0.0)
+        remaining = interval - (time.monotonic() - LAST_AUTO_REPLY_AT)
+        if interval > 0 and LAST_AUTO_REPLY_AT > 0 and remaining > 0:
+            print(f"[自動回覆] 等待 {remaining:.1f} 秒後發布。")
             time.sleep(remaining)
 
         from generate_reply_draft import generate_reply_draft
@@ -498,8 +522,13 @@ def main() -> int:
             "THREADS_WEBHOOK_VERIFY_TOKEN",
             "TELEGRAM_BOT_TOKEN",
             "TELEGRAM_CHAT_ID",
+            "GEMINI_API_KEY",
+            "THREADS_ACCESS_TOKEN",
+            "THREADS_USER_ID",
+            "AUTO_REPLY_CONTROL_SECRET",
         ):
             _config(name)
+        _enable_auto_reply_on_startup()
         # Render 等雲端平台會透過 PORT 指定對外監聽埠；本機仍使用 8787。
         port = int(os.getenv("PORT") or os.getenv("THREADS_WEBHOOK_PORT", "8787"))
         print(f"[完成] Threads Webhook server：http://127.0.0.1:{port}/webhook")

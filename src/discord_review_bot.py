@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import requests
 from pathlib import Path
 from typing import Final
@@ -18,9 +19,9 @@ import discord
 import pystray
 from discord import app_commands
 from dotenv import load_dotenv
+from discord_notify import REGENERATE_CUSTOM_ID
 from PIL import Image
 
-from discord_notify import REGENERATE_CUSTOM_ID
 from generate_reply_draft import generate_reply_draft
 from threads_publish import publish_ghost_post, publish_image_post, publish_reply
 
@@ -28,9 +29,24 @@ PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
 ENV_FILE: Final = PROJECT_ROOT / ".env"
 TRAY_ICON_FILE: Final = PROJECT_ROOT / "assets" / "pidddi.png"
 LOG_FILE: Final = PROJECT_ROOT / "logs" / "discord_bot.log"
+HEARTBEAT_FILE: Final = PROJECT_ROOT / "data" / "discord_bot_heartbeat.json"
 GHOST_DATA_DIR: Final = PROJECT_ROOT / "data" / "ghost_candidates"
 REPLY_DATA_DIR: Final = PROJECT_ROOT / "data" / "reply_drafts"
 MUTEX_NAME: Final = "Local\\HexingBotDiscordBot"
+
+
+def write_heartbeat(status: str) -> None:
+    HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = HEARTBEAT_FILE.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(
+            {"pid": os.getpid(), "status": status, "updated_at": time.time()},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(HEARTBEAT_FILE)
 
 
 class TrayController:
@@ -366,11 +382,7 @@ class RegenerateView(discord.ui.View):
             errors="replace",
         )
         output = (process.stdout or process.stderr).strip()
-        if process.returncode == 3:
-            await interaction.followup.send(
-                "今日已重新發想 5 次，建議先挑一個方向或明天再產。", ephemeral=True
-            )
-        elif process.returncode in (0, 2):
+        if process.returncode in (0, 2):
             await interaction.followup.send("已重新生成 3 則候選。", ephemeral=True)
         else:
             await interaction.followup.send(
@@ -386,9 +398,12 @@ class HexingBot(discord.Client):
         self.tray: TrayController | None = None
         self.event_loop: asyncio.AbstractEventLoop | None = None
         self.restart_requested = False
+        self._heartbeat_task: asyncio.Task[None] | None = None
 
     async def setup_hook(self) -> None:
         self.event_loop = asyncio.get_running_loop()
+        write_heartbeat("setup")
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         self.tree.add_command(publish_threads)
         self.tree.add_command(publish_ghost_thread)
         self.tree.add_command(auto_reply_on)
@@ -406,9 +421,21 @@ class HexingBot(discord.Client):
                 await self.tree.sync(guild=guild)
 
     async def on_ready(self) -> None:
+        write_heartbeat("ready")
         print(f"[完成] Discord Bot 已登入：{self.user}；僅保留 Threads 發布指令。")
         if self.tray:
             self.tray.set_status("已連線", notify=True)
+
+    async def on_disconnect(self) -> None:
+        write_heartbeat("disconnected")
+        if self.tray:
+            self.tray.set_status("連線中斷，正在重連")
+
+    async def _heartbeat_loop(self) -> None:
+        while not self.is_closed():
+            status = "ready" if self.is_ready() else "connecting"
+            write_heartbeat(status)
+            await asyncio.sleep(60)
 
     async def on_message(self, message: discord.Message) -> None:
         return
@@ -807,9 +834,10 @@ async def auto_reply_status(interaction: discord.Interaction) -> None:
 def main() -> int:
     mutex = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
     if ctypes.windll.kernel32.GetLastError() == 183:
-        ctypes.windll.user32.MessageBoxW(
-            None, "HexingBot 已經在右下角執行中。", "HexingBot", 0x40
-        )
+        if "--scheduled" not in sys.argv:
+            ctypes.windll.user32.MessageBoxW(
+                None, "HexingBot 已經在右下角執行中。", "HexingBot", 0x40
+            )
         ctypes.windll.kernel32.CloseHandle(mutex)
         return 0
     load_dotenv(ENV_FILE, override=False)
@@ -825,6 +853,7 @@ def main() -> int:
         print(f"[失敗] 找不到系統匣圖示：{TRAY_ICON_FILE}")
         return 1
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    write_heartbeat("starting")
     handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
     bot = HexingBot(intents=discord.Intents.default())
     tray = TrayController(bot)
@@ -833,6 +862,7 @@ def main() -> int:
     try:
         bot.run(token, log_handler=handler, log_level=logging.INFO)
     finally:
+        write_heartbeat("stopped")
         tray.stop()
         handler.close()
         ctypes.windll.kernel32.CloseHandle(mutex)

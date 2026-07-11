@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import csv
-from datetime import date, timedelta
+import re
+from datetime import date
 from pathlib import Path
 from typing import Any, Final
 
@@ -14,25 +14,20 @@ from gemini_client import GeminiAPIError, GeminiClient
 PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
 CONFIG_DIR: Final = PROJECT_ROOT / "config"
 PENDING_DIR: Final = PROJECT_ROOT / "posts" / "pending"
-ECOSYSTEM_REPORT: Final = PROJECT_ROOT / "research" / "daily_ecosystem_report.md"
-ECOSYSTEM_CSV: Final = PROJECT_ROOT / "data" / "ecosystem_signals.csv"
 
 CONFIG_FILES: Final = (
-    "bot_profile.md",
     "character_hexing.md",
     "content_strategy.md",
+    "threads_format_rules.md",
     "social_rules.md",
     "image_rules.md",
     "trend_keywords.txt",
 )
 
-SYSTEM_INSTRUCTION: Final = """你是 HexingBot 的原創社群內容編輯器。
-你只產生供人工審核的候選文字與 Flow prompt，絕不宣稱已發布，也不要求自動發布。
-角色赫湦面向粉絲時使用 Public Mode：正能量、溫暖、搞笑、公開、保持界線，不戀愛、不曖昧；禁止毒舌、羞辱、優越感與煽動對立。
-面向操作者時使用 Operator Mode：像有風格的創意搭檔。
-禁止搬運、改寫、致敬或模仿 meme、歌詞、歌曲封面、MV、名人照片、動漫、影劇、遊戲角色或他人作品。
-Flow prompt 只能描述原創視覺，不得指定在世藝術家、品牌角色或可辨識作品的風格。
-嚴格遵守要求的 JSON 格式。"""
+SYSTEM_INSTRUCTION: Final = """You are HexingBot's original social content editor.
+Create candidates for human review only. Never claim or request automatic publishing.
+Follow the supplied configuration by priority: social_rules.md > character_hexing.md > content_strategy.md > threads_format_rules.md > image_rules.md > trend context.
+Return exactly the required JSON. Write public copy, category labels, summaries, and inspiration notes in natural Taiwanese Traditional Chinese. Write Flow prompts as image-generation instructions beginning with `赫湦`."""
 
 CANDIDATE_SCHEMA: Final = {
     "type": "object",
@@ -69,6 +64,7 @@ REQUIRED_CANDIDATE_FIELDS: Final = (
     "content_category",
     "inspiration_source",
 )
+LONG_THREAD_SENTENCE: Final = 28
 
 
 def read_settings() -> dict[str, str]:
@@ -81,87 +77,43 @@ def read_settings() -> dict[str, str]:
     return settings
 
 
-def read_ecosystem_context() -> str:
-    """讀取可選的生態摘要；缺檔或讀取失敗時維持原流程。"""
-    sections: list[str] = []
-    try:
-        if ECOSYSTEM_REPORT.is_file():
-            report = ECOSYSTEM_REPORT.read_text(encoding="utf-8").strip()
-            if report:
-                sections.append(f"--- daily_ecosystem_report.md ---\n{report}")
-
-        if ECOSYSTEM_CSV.is_file():
-            cutoff = date.today() - timedelta(days=13)
-            with ECOSYSTEM_CSV.open("r", encoding="utf-8-sig", newline="") as handle:
-                rows = []
-                for row in csv.DictReader(handle):
-                    try:
-                        if date.fromisoformat(row.get("date", "")) >= cutoff:
-                            rows.append(row)
-                    except ValueError:
-                        continue
-            if rows:
-                fields = ("date", "type", "label", "keywords", "vibe", "heat", "days_seen", "hexing_angle", "notes")
-                csv_lines = [",".join(fields)]
-                csv_lines.extend(",".join(str(row.get(field, "")).replace("\n", " ") for field in fields) for row in rows)
-                sections.append("--- ecosystem_signals.csv（最近 14 天） ---\n" + "\n".join(csv_lines))
-    except OSError as exc:
-        print(f"[生態參考警告] 無法讀取生態調查檔案，將照原流程產文：{exc}")
-        return ""
-    return "\n\n".join(sections)
-
-
 def build_prompt(
     settings: dict[str, str],
     previous_rounds: str = "",
     feedback: str = "",
-    ecosystem_context: str = "",
 ) -> str:
     config_text = "\n\n".join(
-        f"--- {filename} ---\n{content or '（目前沒有內容）'}"
+        f"--- {filename} ---\n{content or '(No content provided.)'}"
         for filename, content in settings.items()
     )
     retry_text = ""
     if previous_rounds:
         retry_text = f"""
 
-【重新生成規則】
-以下是先前候選與操作者回饋。請完整吸收拒絕理由，三則新候選都必須避開先前各輪的主題、句型、笑點與場景；不可只換同義詞。
+## Regeneration Rules
+Use all previous candidates and operator feedback. All three new candidates must avoid earlier topics, sentence patterns, joke mechanisms, and settings. Do not merely replace words with synonyms.
 
-先前候選：
+Previous candidates:
 {previous_rounds}
 
-操作者回饋：
+Operator feedback:
 {feedback}
 """
 
-    ecosystem_text = ""
-    if ecosystem_context:
-        ecosystem_text = f"""
+    return f"""Create exactly three Threads candidates for @humanpuddi for human review.
 
-【最近社群氣氛（僅供靈感參考）】
-以下內容不是硬性題目，不要直接報導熱門事件、照抄句子或聲稱即時熱門。應優先找出赫湦會產生鮮明反應的角度，而不是把所有訊號轉成可愛日常。
-{ecosystem_context}
-"""
+Generation date: {date.today().isoformat()}. Use this date and the visible setting to keep clothing seasonally and climatically plausible; assume Taiwan-like subtropical weather unless the concept clearly establishes another environment.
 
-    return f"""今天要為 @humanpuddi 產生三則可人工審核的 Threads 候選貼文。
+1. Select one daily brief from trend_keywords.txt. First decide whether it is text-led or photo-led, then define one core topic, primary content pillar, intended audience response, and primary post function. Photo-led is a complete post function: the image may carry the post while the caption stays minimal. Summarize the brief in trend_summary. Never fabricate a trend or event; state `原創角色發想` when reliable recent evidence is unavailable.
+2. Produce candidate_id A, B, and C in order. Follow content_strategy.md so they remain comparable versions of the same brief.
+3. Write thread_text in natural Taiwanese Traditional Chinese. Follow character_hexing.md for personality and voice, and threads_format_rules.md for length, punctuation, sentence length, line breaks, and spacing. Do not assume every post needs an article. For a photo-led brief, thread_text may be one short phrase, one sentence, a fragment, or a few fitting characters; do not add setup, explanation, moral, or punchline unless the concept needs it. Do not output analysis or formatting notes.
+4. Write flow_prompt as visual direction, not a list of attributes. Begin with `赫湦`, define one dominant visual thesis and an exact captured moment, then use one strong source of tension, a few consequential scene details, and camera/light/composition choices that support the moment. Dress him for the generation date, Taiwan-like climate, activity, and visible environment according to his bright, playful, contemporary Korean-inspired wardrobe identity. Pale green is his recurring favorite color. He may wear original duck, pudding, avocado, retro American, collegiate, food, animal, stripe, check, or abstract patterns; a generic banana, hot-dog, animal, or object costume for comedy; or an original non-franchise cosplay when the concept fits. Vary color, silhouette, texture, layering, and accessories. Never default to a neutral blazer over a plain T-shirt or repeat one outfit formula across the three candidates. Allow the image model to add plausible details that increase depth, motion, texture, and narrative energy without changing the character or story logic. Do not force handsome posing, fashion-editorial presentation, exaggerated acting, or technical filler. Follow image_rules.md exactly.
+5. Write content_category in Traditional Chinese as `內容支柱／貼文功能／情緒`, at most 30 characters. All three candidates share the selected pillar and function; emotional treatment may vary.
+6. Write inspiration_source in Traditional Chinese, at most 180 characters. Identify the actual idea source or ideation method without inventing cultural evidence.
+7. Perform two silent checks: verify character and social boundaries; then verify natural Taiwanese copy, comparable candidates, and a complete concrete Flow prompt. Return JSON only.
 
-請根據 trend_keywords.txt 與提供的最近社群氣氛，整理「今日可用趨勢方向摘要」。這些資料不代表即時熱門；若缺乏可信的近期訊號，請明確說明並改用原創角色發想，不得捏造熱門事件。原創角色發想不等於常青日常，可來自怪宣言、溫暖觀點、角色反差、創作者幕後、人際或網路觀察。
-
-接著產生剛好三則彼此明顯不同的候選，candidate_id 依序為 A、B、C。每則都要：
-0. 依 content_strategy.md 選擇本輪組合。三則必須跨至少三個內容支柱、兩種情緒與兩種貼文功能，但不要機械地固定 A、B、C 類型。不得三則都寫生活瑣事、可愛療癒、寵物、食物、收納或小確幸；即使重新生成也要維持題材、情緒與功能跨度。
-1. 使用赫湦 Public Mode，適合公開粉絲閱讀。
-2. thread_text 是可直接人工審核的繁體中文貼文。
-3. thread_text 必須是完成稿，適合直接複製貼到 Threads；自然分行，可自由使用適量 Emoji 排版，不要輸出說明或 Markdown 標題，最多 350 字。
-4. flow_prompt 是精簡英文原創視覺提示詞，只提供給操作者手動使用 Flow，最多 700 字；不得要求自動生圖或上傳。
-5. content_category 用「內容支柱／貼文功能／情緒」標示本則策略，例如「人格招牌／辨識／荒謬」，最多 30 字。
-6. inspiration_source 用繁體中文簡述原創靈感或流行方向，最多 180 字。若沒有可信的近期梗，寫明「原創角色發想」及實際使用的發想引擎，不得捏造流行事件或假稱使用某個 meme。
-
-安全規則仍必須在生成時遵守，但不要輸出 negative prompt、推薦、版權檢查、邊界檢查或 Operator Mode 說明。
-
-【設定檔】
+## Configuration
 {config_text}
-{ecosystem_text}
 {retry_text}
 """
 
@@ -188,19 +140,52 @@ def validate_result(result: dict[str, Any]) -> None:
         raise GeminiAPIError("Gemini 候選編號必須依序為 A、B、C。")
 
 
+def normalize_thread_text(text: str) -> str:
+    """移除慣用句點；長句獨立成段，短句可連續換行。"""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    paragraphs = re.split(r"\n\s*\n", normalized)
+    output_blocks: list[str] = []
+    for paragraph in paragraphs:
+        source_lines = [line.strip() for line in paragraph.splitlines() if line.strip()]
+        sentences: list[str] = []
+        for line in source_lines:
+            sentences.extend(
+                part.strip()
+                for part in re.split(r"。|(?<=[！？!?])", line)
+                if part.strip()
+            )
+        if not sentences:
+            continue
+        short_run: list[str] = []
+        for sentence in sentences:
+            visible_length = len(re.sub(r"[\s，、！？!?～~…]", "", sentence))
+            if visible_length >= LONG_THREAD_SENTENCE:
+                if short_run:
+                    output_blocks.append("\n".join(short_run))
+                    short_run = []
+                output_blocks.append(sentence)
+            else:
+                short_run.append(sentence)
+        if short_run:
+            output_blocks.append("\n".join(short_run))
+    return "\n\n".join(output_blocks).replace("。", "").strip()
+
+
 
 def generate_candidates(
     settings: dict[str, str],
     previous_rounds: str = "",
     feedback: str = "",
-    ecosystem_context: str = "",
 ) -> dict[str, Any]:
     client = GeminiClient()
     result = client.generate_json(
-        prompt=build_prompt(settings, previous_rounds, feedback, ecosystem_context),
+        prompt=build_prompt(settings, previous_rounds, feedback),
         response_schema=CANDIDATE_SCHEMA,
         system_instruction=SYSTEM_INSTRUCTION,
     )
+    for candidate in result.get("candidates", []):
+        if isinstance(candidate, dict) and isinstance(candidate.get("thread_text"), str):
+            candidate["thread_text"] = normalize_thread_text(candidate["thread_text"])
     validate_result(result)
     return result
 
@@ -272,6 +257,14 @@ def notify_review(result: dict[str, Any], day: str, round_label: str) -> str | N
     return None
 
 
+def notify_control() -> str | None:
+    try:
+        send_review_control()
+    except (RuntimeError, ValueError) as exc:
+        return f"review control: {exc}"
+    return None
+
+
 def report_fatal_error(message: str) -> None:
     print(f"[失敗] {message}")
     notification_error = notify("error", f"HexingBot 今日產文失敗：{message}")
@@ -290,7 +283,7 @@ def main() -> int:
 
     try:
         settings = read_settings()
-        result = generate_candidates(settings, ecosystem_context=read_ecosystem_context())
+        result = generate_candidates(settings)
         markdown = render_markdown(result, day, "原始候選")
         write_markdown(output_path, markdown)
     except (OSError, GeminiAPIError) as exc:
@@ -312,17 +305,9 @@ def main() -> int:
     if notification_errors:
         for error in notification_errors:
             print(f"[通知警告] {error}")
-        print("候選檔案已完成，但部分 Discord 通知失敗。")
+        print("候選檔案已完成，但部分 Telegram 通知失敗。")
         return 2
     return 0
-
-
-def notify_control() -> str | None:
-    try:
-        send_review_control()
-    except (RuntimeError, ValueError) as exc:
-        return f"review control: {exc}"
-    return None
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""直接重新產生今日三則候選；不要求回饋，每天最多五次。"""
+"""直接重新產生今日三則候選；不要求回饋。"""
 
 from __future__ import annotations
 
@@ -9,12 +9,8 @@ from pathlib import Path
 from gemini_client import GeminiAPIError
 from run_daily import (
     PENDING_DIR, generate_candidates, notify, notify_control, notify_review,
-    read_ecosystem_context, read_settings, render_markdown, report_fatal_error,
-    write_markdown,
+    read_settings, render_markdown, report_fatal_error, write_markdown,
 )
-
-MAX_DAILY_REGENERATIONS = 5
-
 
 def retry_number(path: Path) -> int:
     match = re.search(r"_retry(\d+)\.md$", path.name)
@@ -33,14 +29,6 @@ def main() -> int:
         return 1
 
     existing_retries = retry_paths(day)
-    if len(existing_retries) >= MAX_DAILY_REGENERATIONS:
-        message = "今日已重新發想 5 次，建議先挑一個方向或明天再產。"
-        print(f"[停止] {message}")
-        error = notify("review", message)
-        if error:
-            print(f"[通知警告] {error}")
-        return 3
-
     retry = len(existing_retries) + 1
     output_path = PENDING_DIR / f"{day}_retry{retry}.md"
     prior_paths = [original_path, *existing_retries]
@@ -52,7 +40,6 @@ def main() -> int:
             read_settings(),
             previous_rounds,
             "操作者要求直接重新發想；避開所有上一輪主題、句型與笑點。",
-            ecosystem_context=read_ecosystem_context(),
         )
         markdown = render_markdown(result, day, f"第 {retry} 次重新發想")
         write_markdown(output_path, markdown)

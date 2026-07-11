@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import csv
-from datetime import date, timedelta
 from pathlib import Path
 from typing import Final
 
@@ -12,7 +10,6 @@ from memory_store import recent_approved_reply_examples
 
 PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
 CHARACTER_FILE: Final = PROJECT_ROOT / "config" / "character_hexing.md"
-ECOSYSTEM_FILE: Final = PROJECT_ROOT / "data" / "ecosystem_signals.csv"
 
 SCHEMA = {
     "type": "object",
@@ -23,32 +20,6 @@ SCHEMA = {
     },
     "required": ["safe_to_draft", "draft_reply", "reason"],
 }
-
-
-def _recent_internet_language() -> str:
-    """讀取最近 14 天的本機社群訊號；缺檔時不影響回覆。"""
-    if not ECOSYSTEM_FILE.is_file():
-        return "（沒有可靠的近期社群訊號，不要自行捏造流行語）"
-    cutoff = date.today() - timedelta(days=13)
-    lines: list[str] = []
-    try:
-        with ECOSYSTEM_FILE.open("r", encoding="utf-8-sig", newline="") as handle:
-            for row in csv.DictReader(handle):
-                try:
-                    if date.fromisoformat(row.get("date", "")) < cutoff:
-                        continue
-                except ValueError:
-                    continue
-                parts = [
-                    row.get("label", ""), row.get("keywords", ""),
-                    row.get("vibe", ""), row.get("notes", ""),
-                ]
-                line = "｜".join(part.strip() for part in parts if part and part.strip())
-                if line:
-                    lines.append(line)
-    except OSError:
-        return "（近期社群訊號讀取失敗，不要自行捏造流行語）"
-    return "\n".join(f"- {line}" for line in lines[-12:]) or "（沒有可靠的近期社群訊號，不要自行捏造流行語）"
 
 
 def generate_reply_draft(
@@ -64,7 +35,6 @@ def generate_reply_draft(
         retry = f"\nPrevious draft: {previous_draft.strip()}\nUse a different sentence pattern, reaction angle, and joke mechanism. Do not merely replace words with synonyms.\n"
     original = post_text.strip() or "(Original post unavailable. Do not invent context.)"
     conversation = conversation_text.strip() or "(No earlier messages in this reply branch.)"
-    internet_language = _recent_internet_language()
     approved_examples = recent_approved_reply_examples()
     prompt = f"""Original post: {original[:3000]}
 Earlier messages in this same reply branch, oldest to newest:
@@ -90,9 +60,6 @@ When safe, write one short reply from 赫湦 in natural Taiwanese Threads voice:
 Rhythm calibration:
 For `下次吃泡麵比較不容易噴喔`, a short reaction such as `這次先算我繳學費了🥲` fits. Do not turn it into a full performance such as `糟糕，我罪孽深重！但我先說……`. These examples demonstrate rhythm only and must not become templates.
 For `好可愛`, `被你看到了🫣` shows the target rhythm. For `笑死`, `先不要笑 我還在收拾😭` does the same. Do not copy these examples.
-
-Recent 14-day social-language reference (use only when genuinely relevant; never copy directly):
-{internet_language}
 
 Recent human-approved reply examples (style calibration only):
 {approved_examples}

@@ -3,21 +3,16 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Final
-
-import requests
-from dotenv import load_dotenv
 
 from gemini_client import GeminiAPIError, GeminiClient
 from telegram_notify import send_telegram_ghost
 
 
 PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
-ENV_FILE: Final = PROJECT_ROOT / ".env"
 CONFIG_DIR: Final = PROJECT_ROOT / "config"
 DATA_DIR: Final = PROJECT_ROOT / "data" / "ghost_candidates"
 SLOTS: Final = {
@@ -99,38 +94,6 @@ def _write(path: Path, data: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def _send(candidate_id: str, data: dict[str, Any]) -> str:
-    load_dotenv(ENV_FILE, override=False)
-    token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
-    channel_id = os.getenv("DISCORD_REVIEW_CHANNEL_ID", "").strip()
-    if not token or not channel_id.isdigit():
-        raise RuntimeError("Discord Bot Token 或 review 頻道尚未設定。")
-    response = requests.post(
-        f"https://discord.com/api/v10/channels/{channel_id}/messages",
-        headers={"Authorization": f"Bot {token}"},
-        json={
-            "embeds": [{
-                "title": f"限時貼文候選｜{data['slot_label']}",
-                "description": data["text"],
-                "color": 0xF2A7C6,
-                "fields": [{"name": "方向", "value": data["category"], "inline": True}],
-                "footer": {"text": "24 小時後自動消失｜按發布才會送出"},
-            }],
-            "components": [{
-                "type": 1,
-                "components": [
-                    {"type": 2, "style": 3, "label": "發布限時貼文", "custom_id": f"hexing:ghost:publish:{candidate_id}"},
-                    {"type": 2, "style": 2, "label": "略過", "custom_id": f"hexing:ghost:skip:{candidate_id}"},
-                ],
-            }],
-        },
-        timeout=20,
-    )
-    if not response.ok:
-        raise RuntimeError(f"Discord 候選通知失敗。HTTP {response.status_code}：{response.text}")
-    return str(response.json()["id"])
-
-
 def main() -> int:
     slot = sys.argv[1].strip().lower() if len(sys.argv) > 1 else ""
     if slot not in SLOTS:
@@ -162,7 +125,7 @@ def main() -> int:
             raise RuntimeError("；".join(notification_errors))
         for error in notification_errors:
             print(f"[通知警告] {error}")
-    except (OSError, RuntimeError, GeminiAPIError, requests.RequestException) as exc:
+    except (OSError, RuntimeError, GeminiAPIError) as exc:
         print(f"[失敗] {exc}")
         return 1
     print(f"[完成] 已送出限時貼文候選：{candidate_id}")

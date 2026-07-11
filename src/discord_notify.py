@@ -76,12 +76,12 @@ def send_review_candidates(result: dict, day: str, round_label: str) -> None:
     send_telegram_candidates(result, day, round_label)
 
 
-
-
 def send_review_control() -> None:
     """相容舊呼叫名稱；重新發想控制現在只送 Telegram。"""
     from telegram_notify import send_telegram_control
     send_telegram_control()
+
+
 
 
 if __name__ == "__main__":
