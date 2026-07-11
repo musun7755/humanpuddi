@@ -26,12 +26,11 @@ POLL_STATE_FILE: Final = PROJECT_ROOT / "data" / "auto_reply_poll_state.json"
 WEBHOOK_INBOX_FILE: Final = PROJECT_ROOT / "data" / "webhook_inbox.jsonl"
 FIELDS: Final = ["event_id", "reply_id", "thread_id", "author", "comment_text", "post_text", "conversation_text", "draft_reply", "status", "created_at", "handled_at"]
 GRAPH_BASE: Final = "https://graph.threads.net/v1.0"
-BUILD_VERSION: Final = "2026-07-11-polling-fallback"
+BUILD_VERSION: Final = "2026-07-11-no-reply-delay"
 LOCK = threading.RLock()
 AUTO_REPLY_LOCK = threading.Lock()
 AUTO_REPLY_DAILY_LIMIT: Final = 20
 AUTO_REPLY_PER_AUTHOR_THREAD_LIMIT: Final = 3
-LAST_AUTO_REPLY_AT = 0.0
 
 
 def now() -> str:
@@ -369,7 +368,7 @@ def _poll_auto_reply_once() -> int:
     posts = _threads_get(
         "me/threads",
         fields="id,text,timestamp,permalink",
-        limit=int(os.getenv("AUTO_REPLY_POLL_POST_LIMIT", "5")),
+        limit=int(os.getenv("AUTO_REPLY_POLL_POST_LIMIT", "20")),
     ).get("data", [])
     if not isinstance(posts, list):
         posts = []
@@ -384,7 +383,7 @@ def _poll_auto_reply_once() -> int:
         conversation = _threads_get(
             f"{post_id}/conversation",
             fields="id,text,username,timestamp,root_post,replied_to",
-            limit=int(os.getenv("AUTO_REPLY_POLL_CONVERSATION_LIMIT", "50")),
+            limit=int(os.getenv("AUTO_REPLY_POLL_CONVERSATION_LIMIT", "100")),
         ).get("data", [])
         if not isinstance(conversation, list):
             continue
@@ -495,7 +494,6 @@ def _poll_auto_reply_loop() -> None:
 
 
 def _try_auto_reply(record: dict[str, str]) -> bool:
-    global LAST_AUTO_REPLY_AT
     # Webhook 事件可能並行抵達；自動發布統一排隊，避免同時呼叫 API 或寫入記憶庫。
     with AUTO_REPLY_LOCK:
         with LOCK:
@@ -534,12 +532,6 @@ def _try_auto_reply(record: dict[str, str]) -> bool:
                 )
                 return True
 
-        interval = _float_config("AUTO_REPLY_INTERVAL_SECONDS", 0.0)
-        remaining = interval - (time.monotonic() - LAST_AUTO_REPLY_AT)
-        if interval > 0 and LAST_AUTO_REPLY_AT > 0 and remaining > 0:
-            print(f"[自動回覆] 等待 {remaining:.1f} 秒後發布。")
-            time.sleep(remaining)
-
         from generate_reply_draft import generate_reply_draft
         result = generate_reply_draft(
             record["author"], record["comment_text"],
@@ -564,7 +556,6 @@ def _try_auto_reply(record: dict[str, str]) -> bool:
             return False
         draft = str(result["draft_reply"])
         publish_reply(record["reply_id"], draft)
-        LAST_AUTO_REPLY_AT = time.monotonic()
         with LOCK:
             state = _auto_state(); state["daily_count"] += 1; _save_auto_state(state)
         update_record(record["reply_id"], draft_reply=draft, status="auto_replied", handled_at=now())
