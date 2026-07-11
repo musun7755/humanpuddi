@@ -22,9 +22,10 @@ PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
 ENV_FILE: Final = PROJECT_ROOT / ".env"
 LOG_FILE: Final = PROJECT_ROOT / "data" / "reply_log.csv"
 AUTO_STATE_FILE: Final = PROJECT_ROOT / "data" / "auto_reply_state.json"
+WEBHOOK_INBOX_FILE: Final = PROJECT_ROOT / "data" / "webhook_inbox.jsonl"
 FIELDS: Final = ["event_id", "reply_id", "thread_id", "author", "comment_text", "post_text", "conversation_text", "draft_reply", "status", "created_at", "handled_at"]
 GRAPH_BASE: Final = "https://graph.threads.net/v1.0"
-BUILD_VERSION: Final = "2026-07-11-auto-diagnostics"
+BUILD_VERSION: Final = "2026-07-11-signature-inbox"
 LOCK = threading.RLock()
 AUTO_REPLY_LOCK = threading.Lock()
 AUTO_REPLY_DAILY_LIMIT: Final = 20
@@ -111,6 +112,36 @@ def _write(rows: list[dict[str, str]]) -> None:
             writer = csv.DictWriter(file, fieldnames=FIELDS)
             writer.writeheader(); writer.writerows(rows)
         temporary.replace(LOG_FILE)
+
+
+def _remember_webhook(payload: dict[str, Any], status: str = "accepted", note: str = "") -> None:
+    WEBHOOK_INBOX_FILE.parent.mkdir(parents=True, exist_ok=True)
+    item = {
+        "received_at": now(),
+        "status": status,
+        "note": note,
+        "object": payload.get("object"),
+        "entry_count": len(payload.get("entry", [])) if isinstance(payload.get("entry"), list) else 0,
+        "top_level_keys": list(payload.keys()),
+        "payload": payload,
+    }
+    with WEBHOOK_INBOX_FILE.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def _webhook_inbox(limit: int = 10) -> list[dict[str, Any]]:
+    if not WEBHOOK_INBOX_FILE.exists():
+        return []
+    lines = WEBHOOK_INBOX_FILE.read_text(encoding="utf-8").splitlines()[-limit:]
+    items: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            item = json.loads(line)
+            if isinstance(item, dict):
+                items.append(item)
+        except json.JSONDecodeError:
+            continue
+    return items
 
 
 def get_record(reply_id: str) -> dict[str, str] | None:
@@ -521,11 +552,24 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 ensure_ascii=False,
             ).encode("utf-8")
             self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.end_headers(); self.wfile.write(payload)
+        elif path == "/webhook-inbox":
+            if not _control_authorized(self.headers):
+                self.send_error(401); return
+            try:
+                limit = max(1, min(25, int(query.get("limit", ["10"])[0])))
+            except ValueError:
+                limit = 10
+            items = _webhook_inbox(limit)
+            payload = json.dumps(
+                {"build_version": BUILD_VERSION, "count": len(items), "items": items},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.end_headers(); self.wfile.write(payload)
         elif not query and path in {"/", "/health"}:
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
-            self.wfile.write(b"HexingBot Threads Webhook is running")
+            self.wfile.write(f"HexingBot Threads Webhook is running\n{BUILD_VERSION}".encode("utf-8"))
         elif query.get("hub.mode", [""])[0] == "subscribe" and hmac.compare_digest(query.get("hub.verify_token", [""])[0], os.getenv("THREADS_WEBHOOK_VERIFY_TOKEN", "")):
             body = query.get("hub.challenge", [""])[0].encode(); self.send_response(200); self.send_header("Content-Type", "text/plain"); self.end_headers(); self.wfile.write(body)
         else:
@@ -552,11 +596,22 @@ class WebhookHandler(BaseHTTPRequestHandler):
         signature = self.headers.get("X-Hub-Signature-256", "")
         expected = "sha256=" + hmac.new(os.getenv("THREADS_APP_SECRET", "").encode(), body, hashlib.sha256).hexdigest()
         if not os.getenv("THREADS_APP_SECRET") or not hmac.compare_digest(signature, expected):
+            try:
+                raw_payload = json.loads(body)
+                if isinstance(raw_payload, dict):
+                    _remember_webhook(raw_payload, status="rejected", note="invalid_signature")
+            except Exception:
+                _remember_webhook(
+                    {"raw": body.decode("utf-8", errors="replace")[:2000]},
+                    status="rejected",
+                    note="invalid_signature_non_json",
+                )
             self.send_error(403, "Invalid signature")
             send_discord_error("Threads webhook 簽章驗證失敗，事件已拒絕。")
             return
         try:
             payload = json.loads(body)
+            _remember_webhook(payload)
             print(f"[Webhook] 收到 POST：object={payload.get('object', '未知')}，entry={len(payload.get('entry', []))}")
             self.send_response(200); self.end_headers(); self.wfile.write(b"EVENT_RECEIVED")
             threading.Thread(target=process_payload, args=(payload,), daemon=True).start()
