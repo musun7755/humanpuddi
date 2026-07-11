@@ -22,10 +22,11 @@ PROJECT_ROOT: Final = Path(__file__).resolve().parent.parent
 ENV_FILE: Final = PROJECT_ROOT / ".env"
 LOG_FILE: Final = PROJECT_ROOT / "data" / "reply_log.csv"
 AUTO_STATE_FILE: Final = PROJECT_ROOT / "data" / "auto_reply_state.json"
+POLL_STATE_FILE: Final = PROJECT_ROOT / "data" / "auto_reply_poll_state.json"
 WEBHOOK_INBOX_FILE: Final = PROJECT_ROOT / "data" / "webhook_inbox.jsonl"
 FIELDS: Final = ["event_id", "reply_id", "thread_id", "author", "comment_text", "post_text", "conversation_text", "draft_reply", "status", "created_at", "handled_at"]
 GRAPH_BASE: Final = "https://graph.threads.net/v1.0"
-BUILD_VERSION: Final = "2026-07-11-clean-diagnostics"
+BUILD_VERSION: Final = "2026-07-11-polling-fallback"
 LOCK = threading.RLock()
 AUTO_REPLY_LOCK = threading.Lock()
 AUTO_REPLY_DAILY_LIMIT: Final = 20
@@ -77,6 +78,34 @@ def _save_auto_state(state: dict[str, Any]) -> None:
     temporary = AUTO_STATE_FILE.with_suffix(".tmp")
     temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(AUTO_STATE_FILE)
+
+
+def _poll_seconds() -> float:
+    return max(30.0, _float_config("AUTO_REPLY_POLL_SECONDS", 60.0))
+
+
+def _poll_state() -> dict[str, Any]:
+    default: dict[str, Any] = {"initialized": False, "seen_reply_ids": [], "last_run_at": "", "last_error": ""}
+    try:
+        state = json.loads(POLL_STATE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            return default
+    except (OSError, json.JSONDecodeError):
+        return default
+    state["initialized"] = bool(state.get("initialized", False))
+    seen = state.get("seen_reply_ids", [])
+    state["seen_reply_ids"] = [str(item) for item in seen if str(item).strip()][-1000:] if isinstance(seen, list) else []
+    state["last_run_at"] = str(state.get("last_run_at") or "")
+    state["last_error"] = str(state.get("last_error") or "")
+    return state
+
+
+def _save_poll_state(state: dict[str, Any]) -> None:
+    POLL_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    state["seen_reply_ids"] = list(dict.fromkeys(str(item) for item in state.get("seen_reply_ids", []) if str(item).strip()))[-1000:]
+    temporary = POLL_STATE_FILE.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(POLL_STATE_FILE)
 
 
 def _enable_auto_reply_on_startup() -> None:
@@ -216,6 +245,27 @@ def threads_get(reply_id: str) -> dict[str, Any]:
     return response.json()
 
 
+def _threads_get(path: str, **params: str | int) -> dict[str, Any]:
+    request_params: dict[str, str | int] = {"access_token": _config("THREADS_ACCESS_TOKEN"), **params}
+    response = requests.get(f"{GRAPH_BASE}/{path.lstrip('/')}", params=request_params, timeout=30)
+    if not response.ok:
+        raise RuntimeError(f"Threads 讀取失敗 HTTP {response.status_code}: {response.text}")
+    return response.json()
+
+
+def _timestamp_age_seconds(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    except ValueError:
+        return None
+
+
 def _candidate_reply_ids(value: Any, parent_key: str = "") -> list[str]:
     """蒐集 webhook 內可能的留言 ID，排除明確的作者帳號 ID。"""
     found: list[str] = []
@@ -307,6 +357,141 @@ def _conversation_context(reply_id: str, root_post_id: str = "", limit: int = 5)
                 items.append(f"@{detail.get('username') or '未知'}：{text}")
         current_id = _id_from_reference(detail.get("replied_to"))
     return "\n".join(reversed(items[-limit:]))[:3000]
+
+
+def _poll_auto_reply_once() -> int:
+    state = _poll_state()
+    seen: set[str] = set(state["seen_reply_ids"])
+    discovered: set[str] = set(seen)
+    candidates: list[dict[str, str]] = []
+    self_username = os.getenv("THREADS_USERNAME", "humanpuddi").strip().lstrip("@").casefold()
+
+    posts = _threads_get(
+        "me/threads",
+        fields="id,text,timestamp,permalink",
+        limit=int(os.getenv("AUTO_REPLY_POLL_POST_LIMIT", "5")),
+    ).get("data", [])
+    if not isinstance(posts, list):
+        posts = []
+
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+        post_id = str(post.get("id") or "").strip()
+        if not post_id:
+            continue
+        post_text = str(post.get("text") or "")
+        conversation = _threads_get(
+            f"{post_id}/conversation",
+            fields="id,text,username,timestamp,root_post,replied_to",
+            limit=int(os.getenv("AUTO_REPLY_POLL_CONVERSATION_LIMIT", "50")),
+        ).get("data", [])
+        if not isinstance(conversation, list):
+            continue
+
+        self_replied_to = {
+            _id_from_reference(item.get("replied_to"))
+            for item in conversation
+            if isinstance(item, dict)
+            and str(item.get("username") or "").strip().lstrip("@").casefold() == self_username
+        }
+        for item in reversed(conversation):
+            if not isinstance(item, dict):
+                continue
+            reply_id = str(item.get("id") or "").strip()
+            if not reply_id:
+                continue
+            discovered.add(reply_id)
+            author = str(item.get("username") or "").strip()
+            author_key = author.lstrip("@").casefold()
+            comment_text = str(item.get("text") or "").strip()
+            age = _timestamp_age_seconds(item.get("timestamp"))
+            fresh_on_first_run = (
+                not state["initialized"]
+                and age is not None
+                and age <= _float_config("AUTO_REPLY_POLL_INITIAL_LOOKBACK_SECONDS", 15 * 60)
+            )
+            if (
+                (not state["initialized"] and not fresh_on_first_run)
+                or reply_id in seen
+                or reply_id in self_replied_to
+                or author_key == self_username
+                or not comment_text
+                or get_record(reply_id)
+            ):
+                continue
+            candidates.append({
+                "event_id": f"poll:{reply_id}",
+                "reply_id": reply_id,
+                "thread_id": post_id,
+                "author": author or "未知",
+                "comment_text": comment_text,
+                "post_text": post_text,
+                "conversation_text": _conversation_context(reply_id, post_id),
+                "draft_reply": "",
+                "status": "processing",
+                "created_at": now(),
+                "handled_at": "",
+            })
+
+    if not state["initialized"]:
+        state["initialized"] = True
+        state["seen_reply_ids"] = list(discovered)
+        state["last_run_at"] = now()
+        state["last_error"] = ""
+        _save_poll_state(state)
+        print(f"[自動回覆輪詢] 已建立基準：{len(discovered)} 則既有留言。")
+        return 0
+
+    handled = 0
+    for record in candidates:
+        with LOCK:
+            rows = _rows()
+            if any(row.get("reply_id") == record["reply_id"] for row in rows):
+                continue
+            rows.append(record)
+            _write(rows)
+        try:
+            if _try_auto_reply(record):
+                handled += 1
+            else:
+                _telegram_review(record)
+                current = get_record(record["reply_id"])
+                if current and current.get("status") in {"auto_disabled", "auto_daily_limit", "manual_model_rejected"}:
+                    update_record(record["reply_id"], handled_at=now())
+                else:
+                    update_record(record["reply_id"], status="notified", handled_at=now())
+        except Exception as exc:
+            update_record(record["reply_id"], status="error", handled_at=now())
+            try:
+                _telegram_status(
+                    f"Threads 輪詢自動回覆失敗，已記錄錯誤\n\n"
+                    f"作者：{record['author']}\n留言：{record['comment_text']}\n\n錯誤：{exc}"
+                )
+            except Exception:
+                pass
+            print(f"[自動回覆輪詢] 失敗：{exc}")
+
+    state["seen_reply_ids"] = list(discovered)
+    state["last_run_at"] = now()
+    state["last_error"] = ""
+    _save_poll_state(state)
+    if handled:
+        print(f"[自動回覆輪詢] 已自動回覆 {handled} 則。")
+    return handled
+
+
+def _poll_auto_reply_loop() -> None:
+    while True:
+        try:
+            _poll_auto_reply_once()
+        except Exception as exc:
+            state = _poll_state()
+            state["last_run_at"] = now()
+            state["last_error"] = str(exc)
+            _save_poll_state(state)
+            print(f"[自動回覆輪詢] 錯誤：{exc}")
+        time.sleep(_poll_seconds())
 
 
 def _try_auto_reply(record: dict[str, str]) -> bool:
@@ -576,6 +761,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 ensure_ascii=False,
             ).encode("utf-8")
             self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.end_headers(); self.wfile.write(payload)
+        elif path == "/poll-status":
+            if not _control_authorized(self.headers):
+                self.send_error(401); return
+            state = _poll_state()
+            state["build_version"] = BUILD_VERSION
+            payload = json.dumps(state, ensure_ascii=False).encode("utf-8")
+            self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.end_headers(); self.wfile.write(payload)
         elif path == "/webhook-inbox":
             if not _control_authorized(self.headers):
                 self.send_error(401); return
@@ -658,6 +850,8 @@ def main() -> int:
         ):
             _config(name)
         _enable_auto_reply_on_startup()
+        if os.getenv("AUTO_REPLY_POLL_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}:
+            threading.Thread(target=_poll_auto_reply_loop, name="AutoReplyPoller", daemon=True).start()
         # Render 等雲端平台會透過 PORT 指定對外監聽埠；本機仍使用 8787。
         port = int(os.getenv("PORT") or os.getenv("THREADS_WEBHOOK_PORT", "8787"))
         print(f"[完成] Threads Webhook server：http://127.0.0.1:{port}/webhook")
