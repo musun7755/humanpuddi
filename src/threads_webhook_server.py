@@ -24,6 +24,7 @@ LOG_FILE: Final = PROJECT_ROOT / "data" / "reply_log.csv"
 AUTO_STATE_FILE: Final = PROJECT_ROOT / "data" / "auto_reply_state.json"
 FIELDS: Final = ["event_id", "reply_id", "thread_id", "author", "comment_text", "post_text", "conversation_text", "draft_reply", "status", "created_at", "handled_at"]
 GRAPH_BASE: Final = "https://graph.threads.net/v1.0"
+BUILD_VERSION: Final = "2026-07-11-auto-diagnostics"
 LOCK = threading.RLock()
 AUTO_REPLY_LOCK = threading.Lock()
 AUTO_REPLY_DAILY_LIMIT: Final = 20
@@ -283,7 +284,25 @@ def _try_auto_reply(record: dict[str, str]) -> bool:
     with AUTO_REPLY_LOCK:
         with LOCK:
             state = _auto_state()
-            if not state["enabled"] or state["daily_count"] >= AUTO_REPLY_DAILY_LIMIT:
+            if not state["enabled"]:
+                update_record(record["reply_id"], status="auto_disabled", handled_at=now())
+                try:
+                    _telegram_status(
+                        f"Threads 自動回覆目前是關閉狀態，已改送人工處理\n\n"
+                        f"作者：{record['author']}\n留言：{record['comment_text']}"
+                    )
+                except Exception:
+                    pass
+                return False
+            if state["daily_count"] >= AUTO_REPLY_DAILY_LIMIT:
+                update_record(record["reply_id"], status="auto_daily_limit", handled_at=now())
+                try:
+                    _telegram_status(
+                        f"Threads 自動回覆達到今日上限 {AUTO_REPLY_DAILY_LIMIT} 則，已改送人工處理\n\n"
+                        f"作者：{record['author']}\n留言：{record['comment_text']}"
+                    )
+                except Exception:
+                    pass
                 return False
             author = record["author"].strip().lstrip("@").casefold()
             thread_id = record.get("thread_id", "").strip()
@@ -311,7 +330,22 @@ def _try_auto_reply(record: dict[str, str]) -> bool:
             post_text=record.get("post_text", ""),
             conversation_text=record.get("conversation_text", ""),
         )
-        if not result.get("safe_to_draft"): return False
+        if not result.get("safe_to_draft"):
+            reason = str(result.get("reason") or "模型判定需要人工處理").strip()
+            update_record(
+                record["reply_id"],
+                draft_reply=f"[人工處理原因] {reason}"[:500],
+                status="manual_model_rejected",
+                handled_at=now(),
+            )
+            try:
+                _telegram_status(
+                    f"Threads 自動回覆改送人工處理\n\n"
+                    f"作者：{record['author']}\n留言：{record['comment_text']}\n\n原因：{reason}"
+                )
+            except Exception:
+                pass
+            return False
         draft = str(result["draft_reply"])
         publish_reply(record["reply_id"], draft)
         LAST_AUTO_REPLY_AT = time.monotonic()
@@ -411,7 +445,11 @@ def handle_event(event: dict[str, Any]) -> bool:
             _telegram_review(record)
         except Exception as exc:
             print(f"[Telegram] 通知失敗：{exc}")
-        update_record(reply_id, status="notified", handled_at=now())
+        current = get_record(reply_id)
+        if current and current.get("status") in {"auto_disabled", "auto_daily_limit", "manual_model_rejected"}:
+            update_record(reply_id, handled_at=now())
+        else:
+            update_record(reply_id, status="notified", handled_at=now())
         return True
     except Exception as exc:
         update_record(reply_id, status="error", handled_at=now())
@@ -466,8 +504,23 @@ class WebhookHandler(BaseHTTPRequestHandler):
             if not _control_authorized(self.headers):
                 self.send_error(401); return
             with LOCK:
-                payload = json.dumps(_auto_state()).encode()
+                state = _auto_state()
+                state["build_version"] = BUILD_VERSION
+                payload = json.dumps(state).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(payload)
+        elif path == "/recent-replies":
+            if not _control_authorized(self.headers):
+                self.send_error(401); return
+            try:
+                limit = max(1, min(50, int(query.get("limit", ["10"])[0])))
+            except ValueError:
+                limit = 10
+            rows = _rows()[-limit:]
+            payload = json.dumps(
+                {"build_version": BUILD_VERSION, "count": len(rows), "items": rows},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.end_headers(); self.wfile.write(payload)
         elif not query and path in {"/", "/health"}:
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
