@@ -26,7 +26,7 @@ POLL_STATE_FILE: Final = PROJECT_ROOT / "data" / "auto_reply_poll_state.json"
 WEBHOOK_INBOX_FILE: Final = PROJECT_ROOT / "data" / "webhook_inbox.jsonl"
 FIELDS: Final = ["event_id", "reply_id", "thread_id", "author", "comment_text", "post_text", "conversation_text", "draft_reply", "status", "created_at", "handled_at"]
 GRAPH_BASE: Final = "https://graph.threads.net/v1.0"
-BUILD_VERSION: Final = "2026-07-13-poll-comment-age-guard"
+BUILD_VERSION: Final = "2026-07-13-poll-comment-age-guard-v2"
 LOCK = threading.RLock()
 AUTO_REPLY_LOCK = threading.Lock()
 AUTO_REPLY_DAILY_LIMIT: Final = 20
@@ -410,6 +410,12 @@ def _poll_auto_reply_once() -> int:
             comment_text = str(item.get("text") or "").strip()
             age = _timestamp_age_seconds(item.get("timestamp"))
             too_old_for_auto_reply = age is None or age > _poll_reply_max_age_seconds()
+            existing_record = get_record(reply_id)
+            reprocessable_after_disable = (
+                bool(existing_record)
+                and existing_record.get("status") == "auto_disabled"
+                and not too_old_for_auto_reply
+            )
             fresh_on_first_run = (
                 not state["initialized"]
                 and age is not None
@@ -418,11 +424,11 @@ def _poll_auto_reply_once() -> int:
             if (
                 (not state["initialized"] and not fresh_on_first_run)
                 or too_old_for_auto_reply
-                or reply_id in seen
+                or (reply_id in seen and not reprocessable_after_disable)
                 or reply_id in self_replied_to
                 or author_key == self_username
                 or not comment_text
-                or get_record(reply_id)
+                or (existing_record and not reprocessable_after_disable)
             ):
                 continue
             candidates.append({
@@ -447,10 +453,20 @@ def _poll_auto_reply_once() -> int:
     for record in candidates:
         with LOCK:
             rows = _rows()
-            if any(row.get("reply_id") == record["reply_id"] for row in rows):
+            existing = next(
+                (row for row in rows if row.get("reply_id") == record["reply_id"]),
+                None,
+            )
+            if existing and existing.get("status") == "auto_disabled":
+                update_record(
+                    record["reply_id"],
+                    **{key: value for key, value in record.items() if key != "reply_id"},
+                )
+            elif existing:
                 continue
-            rows.append(record)
-            _write(rows)
+            else:
+                rows.append(record)
+                _write(rows)
         try:
             if _try_auto_reply(record):
                 handled += 1
