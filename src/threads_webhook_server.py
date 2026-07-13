@@ -83,6 +83,10 @@ def _poll_seconds() -> float:
     return max(30.0, _float_config("AUTO_REPLY_POLL_SECONDS", 60.0))
 
 
+def _poll_reply_max_age_seconds() -> float:
+    return _float_config("AUTO_REPLY_POLL_REPLY_MAX_AGE_SECONDS", 15 * 60)
+
+
 def _poll_state() -> dict[str, Any]:
     default: dict[str, Any] = {"initialized": False, "seen_reply_ids": [], "last_run_at": "", "last_error": ""}
     try:
@@ -405,13 +409,15 @@ def _poll_auto_reply_once() -> int:
             author_key = author.lstrip("@").casefold()
             comment_text = str(item.get("text") or "").strip()
             age = _timestamp_age_seconds(item.get("timestamp"))
+            too_old_for_auto_reply = age is None or age > _poll_reply_max_age_seconds()
             fresh_on_first_run = (
                 not state["initialized"]
                 and age is not None
-                and age <= _float_config("AUTO_REPLY_POLL_INITIAL_LOOKBACK_SECONDS", 15 * 60)
+                and age <= _poll_reply_max_age_seconds()
             )
             if (
                 (not state["initialized"] and not fresh_on_first_run)
+                or too_old_for_auto_reply
                 or reply_id in seen
                 or reply_id in self_replied_to
                 or author_key == self_username
